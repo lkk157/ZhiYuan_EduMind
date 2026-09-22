@@ -104,7 +104,7 @@ ZhiYuan_EduMind/
 | **M2 文本入库链路**（4–5天） | PDF/Word 解析→页感知切块→两级指纹→embedding→Chroma 分组隔离（暂无 OCR） | app/ingest/{parsers,chunker,fingerprint,pipeline}、app/rag/{embeddings,vector_store}、api/kb.py | 切块含页码；重复上传跳过；改一块只重算一块；手动上传 PDF 后 MySQL+Chroma 可查 | 扫描版 PDF 无文本层→标记占位留给 M5 |
 | **M3 ★窄条可演示闭环**（4–5天）**首个答辩演示点** | 界面跑通「登录→上传→入库→提问→强制【来源：文件名，页码】→无命中兜底」 | rag/{retriever,prompts}、api/chat.py、frontend/app.py+上传/答疑两页、demo_e2e.py | 单测：阈值兜底、来源拼接、非法引用剔除；demo_e2e 正例有来源+负例兜底不编造；tag `M3-thin-slice-demo` | 相似度阈值拍脑袋→3正例/3负例标定 |
 | **M4 多轮追问+检索增强**（3天） | 滑窗短期记忆；模糊/术语/对比问法的 query 改写；兜底话术产品化 | memory/short_term.py、retriever 扩展 | 连续追问「它呢？那第二种呢？」指代正确 | 窗口挤爆 num_ctx→N=6+截断 |
-| **M5 多模态入库（OCR）**（4–5天） | PPT/图片图表公式经视觉模型转文本入库；**显存互斥方案落地** | ingest/{ocr.py,parsers}、core/llm.py 模型切换锁 | 含公式 PPT 提问有来源；入库全程 nvidia-smi 无 OOM（记录峰值）；tag | **模型不可用**→fallback `qwen2.5-vl:3b`（见风险预案）；OCR 慢→异步入库+进度条 |
+| **M5 多模态入库（OCR）**（4–5天） | PPT/图片图表公式经视觉模型转文本入库；**显存互斥方案落地** | ingest/{ocr.py,parsers}、core/llm.py 模型切换锁 | 含公式 PPT 提问有来源；入库全程 nvidia-smi 无 OOM（记录峰值）；tag | **模型不可用**→fallback `deepseek-ocr`/`qwen2.5-vl:3b`（见风险预案）；OCR 慢→异步入库+进度条 |
 | **M6 Agent 智能调度**（5天） | 意图分类（答疑/出题/总结/计算）→LangGraph 分发工具；多轮可切换意图 | agent/{graph,intent,tools}.py | 同会话「出3道题→总结上一节→这道题怎么算」路由正确；非法标签默认答疑单测过 | 7B 分类不稳→温度0+枚举+few-shot |
 | **M7 长效记忆+个性化**（4–5天） | 记忆提炼与语义召回（双写）；错题解析、知识点关联推荐、题库完善 | memory/long_term.py、api/quiz.py、models 扩表 | 新会话能「记得」用户弱点并调整讲解；user_id 隔离单测过 | 7B 提炼质量→模板固定字段；隐私→仅本用户可见 |
 | **M8 监控看板+答辩收尾**（3–4天） | 日志完善、Streamlit 看板（提问量/高频知识点/命中率）、README 定稿、演示脚本 | monitoring/*、pages/dashboard.py、demo_e2e 完整版 | 跑 20 条问答看板对账；5 分钟全流程演示不 OOM | 看板慢→加时间范围/索引（体量小） |
@@ -117,7 +117,7 @@ ZhiYuan_EduMind/
 
 | # | 风险 | 预案 |
 |---|---|---|
-| R1 | **DeepSeek-OCR 拉取失败或识别质量不佳** | M1 的 `check_ollama.sh` 探测 `deepseek-ocr` 可用性与识别效果；fallback 视觉模型 `qwen2.5-vl:3b`；`.env` 的 `OCR_MODEL` 一键切换，代码不写死 |
+| R1 | **GLM-OCR 拉取失败或识别质量不佳** | M1 的 `check_ollama.sh` 探测 `glm-ocr` 可用性与识别效果；fallback：`deepseek-ocr`（6.7GB）→ `qwen2.5-vl:3b`；`.env` 的 `OCR_MODEL` 一键切换，代码不写死 |
 | R2 | **8G 显存 OOM** | 互斥锁 + Semaphore(1)；OCR `keep_alive=0` 且与 LLM 错峰；`num_ctx≤4096`；M5 验收必查 nvidia-smi 峰值；极端时 LLM 降 `qwen2.5:3b` 保底 |
 | R3 | 7B 意图分类不稳 | 温度 0 + 强制枚举 + max_tokens≤16 + few-shot；非法默认「答疑」 |
 | R4 | Windows 路径/编码/CRLF | pathlib + `encoding="utf-8"`；`core.autocrlf input` + `core.quotepath false` |

@@ -27,7 +27,7 @@
 
 ## 4. 技术栈锁定（替换需产品经理书面确认）
 FastAPI / Streamlit / MySQL 8.x / ChromaDB / LangGraph /
-Ollama（LLM: Qwen2.5:7b（本机实际标签 `qwen2.5:7b-instruct-q4_K_M`）；视觉OCR: DeepSeek-OCR；Embedding: Qwen3-Embedding:0.6b）/
+Ollama（LLM: Qwen2.5:7b（本机实际标签 `qwen2.5:7b-instruct-q4_K_M`）；视觉OCR: GLM-OCR（glm-ocr）；Embedding: Qwen3-Embedding:0.6b）/
 JWT（PyJWT）/ pytest。
 
 ## 5. 代码质量约定

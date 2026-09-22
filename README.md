@@ -11,7 +11,7 @@
 | 层次 | 选型 | 用途 |
 |---|---|---|
 | 大语言模型 | Ollama + Qwen2.5:7b（本机标签 `qwen2.5:7b-instruct-q4_K_M`） | 答疑、出题、总结、意图分类 |
-| 视觉/OCR | Ollama + DeepSeek-OCR * | PPT/图片中图表、公式识别转文本 |
+| 视觉/OCR | Ollama + GLM-OCR（`glm-ocr`）* | PPT/图片中图表、公式识别转文本 |
 | 文本向量化 | Ollama + Qwen3-Embedding:0.6b | 文档切片与记忆片段嵌入 |
 | 向量库 | ChromaDB（嵌入式持久化） | 切片/记忆语义检索；生产升级 Qdrant（见下表） |
 | 数据库 | MySQL 8.x | 事实源：用户/会话/文档元数据/增量指纹/日志 |
@@ -41,8 +41,8 @@
    ```bash
    ollama pull qwen2.5:7b-instruct-q4_K_M   # LLM（本机已装则跳过）
    ollama pull qwen3-embedding:0.6b
-   ollama pull deepseek-ocr                  # 视觉/OCR 定为 DeepSeek-OCR（若失败 fallback qwen2.5-vl:3b，
-                                             # 并同步修改 .env 中 OCR_MODEL——代码不写死模型名）
+   ollama pull glm-ocr                       # 视觉/OCR 定为 GLM-OCR（2.2GB 轻量；若失败 fallback deepseek-ocr
+                                             # 或 qwen2.5-vl:3b，并同步修改 .env 中 OCR_MODEL）
    ollama list                               # 确认模型在列，并将 NAME 原样填入 .env
    ```
 2. **配置**：`cp .env.example .env`，修改 `MYSQL_PASSWORD`（本机真实密码）与 `JWT_SECRET`（随机串）。
