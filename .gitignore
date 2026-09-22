@@ -1,0 +1,25 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ===== 环境与密钥（绝不入库）=====
+.env
+
+# ===== 运行时数据（可重建/有版权/体积大）=====
+data/
+logs/
+
+# ===== IDE / 系统 =====
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# ===== 模型 / 临时文件 =====
+*.pt
+*.bin
+tmp/
