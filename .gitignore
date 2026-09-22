@@ -22,4 +22,5 @@ desktop.ini
 # ===== 模型 / 临时文件 =====
 *.pt
 *.bin
+*.gguf
 tmp/
