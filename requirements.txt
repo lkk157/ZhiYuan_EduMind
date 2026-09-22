@@ -1,0 +1,31 @@
+# ===== M0/M1 基础（骨架、鉴权、DB）=====
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+SQLAlchemy>=2.0
+PyMySQL>=1.1
+PyJWT>=2.8
+passlib[bcrypt]>=1.7
+python-multipart>=0.0.9
+httpx>=0.27
+
+# ===== M2 入库 / RAG =====
+chromadb>=0.5
+pypdf>=4.2
+python-pptx>=0.6.23
+python-docx>=1.1
+Pillow>=10.3
+
+# ===== M5 OCR（视觉模型经 Ollama 调用，无需额外依赖；备用 PaddleOCR 暂不引入）=====
+
+# ===== M6 Agent =====
+langgraph>=0.2
+
+# ===== 前端 =====
+streamlit>=1.36
+
+# ===== 测试 =====
+pytest>=8.2
+pytest-asyncio>=0.23
