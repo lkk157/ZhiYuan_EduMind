@@ -12,7 +12,7 @@ ZhiYuan_EduMind/
 ├── .env.example              # 配置模板（真实 .env 含密码，绝不入库）
 ├── .gitignore                # 忽略 .env / data / logs / 缓存 / venv
 ├── docs/
-│   └── ROADMAP.md            # 本文件：目录树 + M0–M8 计划
+│   └── ROADMAP.md            # 本文件：目录树 + M0–M6 计划（2026-09-23 重排）
 │
 ├── app/                      # ★ 后端主程序（FastAPI）
 │   ├── main.py               #   应用入口：创建 app、挂路由、启动建表/初始化
@@ -69,12 +69,14 @@ ZhiYuan_EduMind/
 │   ├── conftest.py           #   三大 fixture：SQLite 内存库 / EphemeralChroma / Mock LLM
 │   ├── test_smoke.py         #   骨架完整性（M0）
 │   ├── test_security.py      #   JWT/密码（M1）
+│   ├── test_parsers.py       #   PDF/Word/PPT 解析与无文本层占位（M2）
 │   ├── test_chunker.py       #   切块与页码元数据（M2）
 │   ├── test_fingerprint.py   #   增量指纹（M2）
-│   ├── test_retriever.py     #   检索+兜底阈值（M3）
-│   ├── test_citation.py      #   来源强制拼接（M3）
-│   ├── test_intent.py        #   意图分类路由（M6）
-│   └── test_memory.py        #   窗口/提炼/召回（M7）
+│   ├── test_retriever.py     #   检索+兜底阈值+分组隔离（M2）
+│   ├── test_citation.py      #   来源强制拼接（M2）
+│   ├── test_kb_chat.py       #   知识库/问答接口（M2）
+│   ├── test_intent.py        #   意图分类路由（M3）
+│   └── test_memory.py        #   窗口/提炼/召回（M5）
 │
 ├── scripts/                  #   运维/演示脚本（给人跑的）
 │   ├── check_ollama.sh       #   模型拉取/连通性/显存检查（含 fallback 模型探测）
@@ -87,29 +89,28 @@ ZhiYuan_EduMind/
 └── logs/                     #   运行日志（gitignore）
 ```
 
-**为什么这么分层（答辩可直接讲）：** ① api 薄、能力厚，改界面不碰坏检索；② ingest（写路径）与 rag（读路径）分离，显存互斥策略正好按这条线切；③ db 独立且 MySQL 是事实源、向量库是衍生索引，单测可换 SQLite；④ agent/memory/monitoring 可拔插——M3 窄条完全不依赖它们；⑤ frontend 只走 HTTP，体现多端架构。
+**为什么这么分层（答辩可直接讲）：** ① api 薄、能力厚，改界面不碰坏检索；② ingest（写路径）与 rag（读路径）分离，显存互斥策略正好按这条线切；③ db 独立且 MySQL 是事实源、向量库是衍生索引，单测可换 SQLite；④ agent/memory/monitoring 可拔插——M2 窄条完全不依赖它们；⑤ frontend 只走 HTTP，体现多端架构。
 
 ---
 
-## 二、开发节点规划 M0–M8（窄条优先）
+## 二、开发节点规划 M0–M6（窄条优先）
 
-> 总原则：**M3 出首个可演示闭环**（答辩信心保障），之后按「多轮→多模态→Agent→记忆→看板」扩展。
+> **2026-09-23 产品经理调整（计划变更记录）**：RAG 知识库与前端优先——原 M2+M3 合并为新 M2（阶段完成即可在前端登录、查看功能）；Agent 提前至新 M3 并吸收原 M4 多轮追问（需求③本就把「多轮追问」列在 Agent 名下，指代消解与模糊/对比提问改写是同一个 query 改写模块）；OCR/记忆/看板顺延重编号为 M4–M6。协作流程（五步节奏/显存红线/git 门禁/过程报告）不变。
+> 总原则：**M2 出首个可演示闭环**（答辩信心保障），之后按「Agent→多模态→记忆→看板」扩展。
 > 每阶段固定节奏（CLAUDE.md 强制）：**思路→用户确认→代码→单元测试→git push（打 tag）**。
-> 需求覆盖映射：需求1多模态知识库→M2+M5｜需求2溯源RAG→M3+M4｜需求3Agent→M6｜需求4记忆→M4+M7｜需求5个性化→M7｜生产思维（并发显存/鉴权/增量/日志）→M1+M2+M5+M8。
+> 需求覆盖映射：需求1多模态知识库→M2+M4｜需求2溯源RAG→M2+M3｜需求3Agent→M3｜需求4记忆→M3+M5｜需求5个性化→M5｜生产思维（并发显存/鉴权/增量/日志）→M1+M2+M4+M6。
 
 | 里程碑 | 目标 | 关键产出 | 验收标准 | 主要风险 |
 |---|---|---|---|---|
-| **M0 项目骨架与协作规范**（0.5天） | 仓库、文档、规则、冒烟测试 | README、CLAUDE.md、ROADMAP、.gitignore/.env.example/requirements.txt、test_smoke.py | `pytest -q` 秒过；GitHub 可见；README 含 9 行对比表 | SSH/CRLF/中文乱码（见 README 快速开始排查命令） |
-| **M1 基础设施打通**（2–3天） | 配置、MySQL 建表、JWT 注册登录、Ollama 连通+**推理互斥锁** | app/core/{config,security,llm,exceptions}.py、app/db/*、api/auth.py、scripts/{check_ollama.sh,init_db.sql} | JWT 往返/密码哈希单测过；curl 注册→登录拿 token；check_ollama.sh 打印模型清单+显存基线 | 模型未齐→check 脚本探测 fallback；MySQL 时区/编码→统一 utf8mb4 |
-| **M2 文本入库链路**（4–5天） | PDF/Word 解析→页感知切块→两级指纹→embedding→Chroma 分组隔离（暂无 OCR） | app/ingest/{parsers,chunker,fingerprint,pipeline}、app/rag/{embeddings,vector_store}、api/kb.py | 切块含页码；重复上传跳过；改一块只重算一块；手动上传 PDF 后 MySQL+Chroma 可查 | 扫描版 PDF 无文本层→标记占位留给 M5 |
-| **M3 ★窄条可演示闭环**（4–5天）**首个答辩演示点** | 界面跑通「登录→上传→入库→提问→强制【来源：文件名，页码】→无命中兜底」 | rag/{retriever,prompts}、api/chat.py、frontend/app.py+上传/答疑两页、demo_e2e.py | 单测：阈值兜底、来源拼接、非法引用剔除；demo_e2e 正例有来源+负例兜底不编造；tag `M3-thin-slice-demo` | 相似度阈值拍脑袋→3正例/3负例标定 |
-| **M4 多轮追问+检索增强**（3天） | 滑窗短期记忆；模糊/术语/对比问法的 query 改写；兜底话术产品化 | memory/short_term.py、retriever 扩展 | 连续追问「它呢？那第二种呢？」指代正确 | 窗口挤爆 num_ctx→N=6+截断 |
-| **M5 多模态入库（OCR）**（4–5天） | PPT/图片图表公式经视觉模型转文本入库；**显存互斥方案落地** | ingest/{ocr.py,parsers}、core/llm.py 模型切换锁 | 含公式 PPT 提问有来源；入库全程 nvidia-smi 无 OOM（记录峰值）；tag | **模型不可用**→fallback `deepseek-ocr`/`qwen2.5-vl:3b`（见风险预案）；OCR 慢→异步入库+进度条 |
-| **M6 Agent 智能调度**（5天） | 意图分类（答疑/出题/总结/计算）→LangGraph 分发工具；多轮可切换意图 | agent/{graph,intent,tools}.py | 同会话「出3道题→总结上一节→这道题怎么算」路由正确；非法标签默认答疑单测过 | 7B 分类不稳→温度0+枚举+few-shot |
-| **M7 长效记忆+个性化**（4–5天） | 记忆提炼与语义召回（双写）；错题解析、知识点关联推荐、题库完善 | memory/long_term.py、api/quiz.py、models 扩表 | 新会话能「记得」用户弱点并调整讲解；user_id 隔离单测过 | 7B 提炼质量→模板固定字段；隐私→仅本用户可见 |
-| **M8 监控看板+答辩收尾**（3–4天） | 日志完善、Streamlit 看板（提问量/高频知识点/命中率）、README 定稿、演示脚本 | monitoring/*、pages/dashboard.py、demo_e2e 完整版 | 跑 20 条问答看板对账；5 分钟全流程演示不 OOM | 看板慢→加时间范围/索引（体量小） |
+| **M0 项目骨架与协作规范**（0.5天）✅ | 仓库、文档、规则、冒烟测试 | README、CLAUDE.md、ROADMAP、.gitignore/.env.example/requirements.txt、test_smoke.py | `pytest -q` 秒过；GitHub 可见；README 含 9 行对比表 | SSH/CRLF/中文乱码（见 README 快速开始排查命令） |
+| **M1 基础设施打通**（2–3天）✅ | 配置、MySQL 建表、JWT 注册登录、Ollama 连通+**推理互斥锁** | app/core/{config,security,llm,exceptions}.py、app/db/*、api/auth.py、scripts/{check_ollama.sh,init_db.sql} | JWT 往返/密码哈希单测过；curl 注册→登录拿 token；check_ollama.sh 打印模型清单+显存基线 | 模型未齐→check 脚本探测 fallback；MySQL 时区/编码→统一 utf8mb4 |
+| **M2 ★RAG 知识库与前端闭环**（5–7天）**首个答辩演示点**（原 M2+M3 合并） | 文本入库链路 + 精准溯源问答 + 前端登录与功能页 | ingest/{parsers,chunker,fingerprint,pipeline}、rag/{embeddings,vector_store,retriever,prompts}、api/{kb,chat}.py、frontend（登录/上传管理/智能答疑）、demo_e2e.py | 切块含页码；重传同文件短路、改一块只重算一块；前端登录→上传→提问→强制【来源：文件名，第X页】；无关问题兜底不编造；tag `M2-rag-kb-demo` | 相似度阈值拍脑袋→3正例/3负例标定；扫描版 PDF 无文本层→标记占位留给 M4 |
+| **M3 Agent 智能调度与多轮增强**（5–6天）（原 M6+M4 合并） | 意图分类（答疑/出题/总结/计算）→LangGraph 分发工具；多轮滑窗 + query 改写（模糊/术语/对比/指代）；兜底话术产品化 | agent/{graph,intent,tools}.py、memory/short_term.py、retriever 扩展 | 同会话「出3道题→总结上一节→这道题怎么算」路由正确；连续追问「它呢？那第二种呢？」指代正确；非法标签默认答疑单测过；tag `M3-agent` | 7B 分类不稳→温度0+枚举+few-shot；窗口挤爆 num_ctx→N=6+截断 |
+| **M4 多模态入库（OCR）**（4–5天） | PPT/图片图表公式经视觉模型转文本入库；**显存互斥方案落地** | ingest/{ocr.py,image_parser.py}、parsers 扩展 | 含公式 PPT 提问有来源；入库全程 nvidia-smi 无 OOM（记录峰值）；tag `M4-ocr-multimodal` | **模型不可用**→fallback `deepseek-ocr`/`qwen2.5-vl:3b`（见风险预案）；OCR 慢→异步入库+进度条 |
+| **M5 长效记忆+个性化**（4–5天） | 记忆提炼与语义召回（双写）；错题解析、知识点关联推荐、题库完善 | memory/long_term.py、api/quiz.py、models 扩表 | 新会话能「记得」用户弱点并调整讲解；user_id 隔离单测过 | 7B 提炼质量→模板固定字段；隐私→仅本用户可见 |
+| **M6 监控看板+答辩收尾**（3–4天） | 日志完善、Streamlit 看板（提问量/高频知识点/命中率）、README 定稿、演示脚本 | monitoring/*、pages/dashboard.py、demo_e2e 完整版 | 跑 20 条问答看板对账；5 分钟全流程演示不 OOM | 看板慢→加时间范围/索引（体量小） |
 
-> 节奏建议：每 3–7 天一个里程碑（纯开发约 5–7 周），完成后空一周回归+打磨演示；在 M3/M5/M6 各安排一次预答辩彩排。每阶段完成后按规范：**单测全绿 → `git push`**，里程碑额外打 tag。
+> 节奏建议：每 3–7 天一个里程碑（纯开发约 5–7 周），完成后空一周回归+打磨演示；在 M2/M3/M4 各安排一次预答辩彩排。每阶段完成后按规范：**单测全绿 → `git push`**，里程碑额外打 tag；过程报告随阶段入库（CLAUDE.md §8）。
 
 ---
 
@@ -118,8 +119,8 @@ ZhiYuan_EduMind/
 | # | 风险 | 预案 |
 |---|---|---|
 | R1 | **GLM-OCR 拉取失败或识别质量不佳** | M1 的 `check_ollama.sh` 探测 `glm-ocr` 可用性与识别效果；fallback：`deepseek-ocr`（6.7GB）→ `qwen2.5-vl:3b`；`.env` 的 `OCR_MODEL` 一键切换，代码不写死 |
-| R2 | **8G 显存 OOM** | 互斥锁 + Semaphore(1)；OCR `keep_alive=0` 且与 LLM 错峰；`num_ctx≤4096`；M5 验收必查 nvidia-smi 峰值；极端时 LLM 降 `qwen2.5:3b` 保底 |
+| R2 | **8G 显存 OOM** | 互斥锁 + Semaphore(1)；OCR `keep_alive=0` 且与 LLM 错峰；`num_ctx≤4096`；M4 验收必查 nvidia-smi 峰值；极端时 LLM 降 `qwen2.5:3b` 保底 |
 | R3 | 7B 意图分类不稳 | 温度 0 + 强制枚举 + max_tokens≤16 + few-shot；非法默认「答疑」 |
 | R4 | Windows 路径/编码/CRLF | pathlib + `encoding="utf-8"`；`core.autocrlf input` + `core.quotepath false` |
-| R5 | 扫描版 PDF 无文本层 | M2 标记占位 → M5 OCR 接管 |
+| R5 | 扫描版 PDF 无文本层 | M2 标记占位 → M4 OCR 接管 |
 | R6 | 依赖版本漂移（chromadb/langgraph） | requirements 给下限版本；每里程碑用干净 venv 冒烟一次 |
