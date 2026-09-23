@@ -54,10 +54,16 @@
    git config core.quotepath false     # 中文文件名不乱码
    ssh -T git@github.com               # 验证 SSH 密钥（应返回 Hi lkk157!）
    ```
-6. 启动命令将在 M1 起补充（`uvicorn` + `streamlit run`）。
+6. **启动服务**（两个终端分别执行）：
+   ```bash
+   # 终端 1：后端 API（http://127.0.0.1:8000）
+   uvicorn app.main:app --reload --port 8000
+   # 终端 2：前端界面（http://127.0.0.1:8501；默认打 127.0.0.1:8000，可用环境变量 API_BASE_URL 覆盖）
+   streamlit run frontend/app.py
+   ```
 
 ## 目录结构与开发里程碑
-完整目录树（含每文件职责标注）与 M0–M8 开发计划见 **[docs/ROADMAP.md](docs/ROADMAP.md)**。
+完整目录树（含每文件职责标注）与 M0–M6 开发计划（2026-09-23 重排）见 **[docs/ROADMAP.md](docs/ROADMAP.md)**。
 
 ## 协作与提交规范（摘要，详见 [CLAUDE.md](CLAUDE.md)）
 - 节奏五步：**思路 → 确认 → 代码（详细中文注释讲“为什么”）→ 测试 → git push**，禁止一口气生成所有代码；
