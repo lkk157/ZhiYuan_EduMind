@@ -42,8 +42,8 @@ if report:
             st.caption(f"共 {report['page_count']} 页 / {report['chunk_count']} 块进入向量库")
             if report.get("empty_pages"):
                 st.warning(
-                    f"第 {_fmt_pages(report['empty_pages'])} 页无文本层（扫描页/纯图页），"
-                    "已登记，将在多模态阶段（OCR）补识别。"
+                    f"第 {_fmt_pages(report['empty_pages'])} 页未能识别出文本（空白页或 OCR 失败），"
+                    "已登记；重新上传该文件可重试。"
                 )
         if st.button("关闭", key="close_report"):
             st.session_state.upload_report = None
@@ -94,9 +94,12 @@ with st.popover("删除当前分组"):
 
 # ---------- 上传 ----------
 st.subheader("上传课件")
-st.caption("支持 PDF / Word / PPT。同名重传 = 增量更新（只重算变化块）。")
+st.caption(
+    "支持 PDF / Word / PPT / 图片（png、jpg）。同名重传 = 增量更新（只重算变化块）；"
+    "含扫描页或图片的文档会经 OCR 识别，耗时略长。"
+)
 with st.form("upload_form"):
-    up = st.file_uploader("选择课件文件", type=["pdf", "docx", "pptx"])
+    up = st.file_uploader("选择课件文件", type=["pdf", "docx", "pptx", "png", "jpg", "jpeg"])
     if st.form_submit_button("上传并入库", icon=":material/upload:"):
         if up is None:
             st.warning("请先选择文件。")
@@ -136,5 +139,5 @@ for d in docs:
         st.caption(f"状态 {d['status']} · {d['page_count']} 页 · {d['chunk_count']} 块")
         if d.get("empty_pages"):
             st.caption(
-                f":material/scanner: 第 {_fmt_pages(d['empty_pages'])} 页无文本层，将在多模态阶段（OCR）识别"
+                f":material/scanner: 第 {_fmt_pages(d['empty_pages'])} 页未识别出文本（空白/失败），重新上传可重试"
             )
