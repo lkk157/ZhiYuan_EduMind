@@ -82,12 +82,18 @@ async def test_vram_mutex_sequence_unload_before_ocr(tmp_path, monkeypatch):
 
     names = _call_names(fake)
     # 时序断言：查驻留 → 卸 LLM → 再跑 OCR（顺序错了 8G 显存会同时装两类大模型）
-    assert names.index("unload") < names.index("generate")
-    assert ("unload", settings.llm_model) in fake.calls
+    first_unload = next(i for i, c in enumerate(fake.calls) if c[0] == "unload")
+    first_gen = names.index("generate")
+    assert first_unload < first_gen
+    assert fake.calls[first_unload] == ("unload", settings.llm_model)  # 先卸的是 LLM
+    # 互斥序列收尾：批末显式卸载 OCR（兑现 OCR_KEEP_ALIVE=0 的「用完即卸」）
+    assert fake.calls[-1] == ("unload", settings.ocr_model)
 
     gen_kwargs = next(c[1] for c in fake.calls if c[0] == "generate")
     assert gen_kwargs["model"] == settings.ocr_model  # 模型名只从配置读
-    assert gen_kwargs["keep_alive"] == settings.ocr_keep_alive  # "0" 用完即卸（红线）
+    # 批内驻留策略：多图批次共享一次加载（配置为 0 时批内 hold、批末卸——见 ocr.py docstring）
+    expected_hold = "5m" if str(settings.ocr_keep_alive) == "0" else str(settings.ocr_keep_alive)
+    assert gen_kwargs["keep_alive"] == expected_hold
     assert gen_kwargs["num_predict"] == OCR_NUM_PREDICT
     assert gen_kwargs["temperature"] == 0.0
     assert len(gen_kwargs["images"]) == 1
@@ -113,20 +119,28 @@ async def test_no_unload_when_llm_not_resident(tmp_path, monkeypatch):
     pages, empty = parse_document(path)
     failed = await ocr_fill_pages(path, pages, empty)
 
-    assert "unload" not in _call_names(fake)  # 没驻留就不卸
+    # LLM 没驻留就不卸它（否则白等一次冷加载）；批末仍要卸 OCR 自己
+    assert ("unload", settings.llm_model) not in fake.calls
     assert "generate" in _call_names(fake)  # OCR 照常执行
+    assert fake.calls[-1] == ("unload", settings.ocr_model)
     assert failed == []
 
 
 @pytest.mark.asyncio
 async def test_no_ocr_touch_when_no_empty_pages(tmp_path, monkeypatch):
-    """纯文本文档（empty_pages=[]）零模型调用：不查驻留、不卸、不识别。"""
+    """纯文本文档（无空页、无嵌入图）零模型调用：不查驻留、不卸、不识别。"""
+    from tests.test_parsers import _build_pdf
+
     from app.ingest.ocr import ocr_fill_pages
-    from app.ingest.parsers import ParsedPage
+    from app.ingest.parsers import parse_document
 
     fake = _FakeOcrGateway()
     monkeypatch.setattr("app.ingest.ocr.gateway", fake)
-    failed = await ocr_fill_pages(tmp_path / "x.pdf", [ParsedPage(1, "有文本")], [])
+    # 真实的纯文本 PDF（无嵌入图）：收集阶段零模型调用
+    path = tmp_path / "text_only.pdf"
+    path.write_bytes(_build_pdf(["pure text page"]))
+    pages, empty = parse_document(path)
+    failed = await ocr_fill_pages(path, pages, empty)
     assert failed == []
     assert fake.calls == []
 
@@ -177,6 +191,87 @@ async def test_blank_pdf_page_rendered_by_pymupdf(tmp_path, monkeypatch):
     assert "扫描页识别出的正文" in pages[0].text
     # 确实走了渲染取图（generate 收到图像）
     assert any(c[0] == "generate" for c in fake.calls)
+
+
+@pytest.mark.asyncio
+async def test_pptx_mixed_slide_embedded_image_ocr(tmp_path, monkeypatch):
+    """★ 混合页：PPT 同页有文字也有图 → 文字层直读保留 + 图片 OCR 追加（带标记），复用图去重只认一次。"""
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    from app.ingest.ocr import EMBEDDED_IMAGE_MARKER, ocr_fill_pages
+    from app.ingest.parsers import parse_document
+
+    img_path = tmp_path / "formula.png"
+    img_path.write_bytes(_png_bytes())
+    prs = Presentation()
+    # 第 1 页：文字 + 两张**同一张**图片（测全档去重）
+    s1 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb = s1.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(5), Inches(1))
+    tb.text_frame.text = "课堂要点"
+    s1.shapes.add_picture(str(img_path), Inches(1), Inches(1.5), Inches(2), Inches(2))
+    s1.shapes.add_picture(str(img_path), Inches(3.5), Inches(1.5), Inches(2), Inches(2))
+    # 第 2 页：纯文字（无图 → 不产生 OCR 任务）
+    s2 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb2 = s2.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(5), Inches(1))
+    tb2.text_frame.text = "要点二"
+    path = tmp_path / "mixed.pptx"
+    prs.save(str(path))
+
+    fake = _FakeOcrGateway(active=[], reply="公式 E 等于 m c 平方")
+    monkeypatch.setattr("app.ingest.ocr.gateway", fake)
+
+    pages, empty = parse_document(path)
+    assert empty == []  # 混合页有文字 → 不进空页清单
+    failed = await ocr_fill_pages(path, pages, empty)
+    assert failed == []
+
+    # 第 1 页：原文保留 + 标记 + OCR 文本追加
+    assert "课堂要点" in pages[0].text
+    assert EMBEDDED_IMAGE_MARKER in pages[0].text
+    assert "E 等于" in pages[0].text
+    # 同页同一张图插了两次 → 全档字节哈希去重，只识别一次
+    assert sum(1 for c in fake.calls if c[0] == "generate") == 1
+    # 第 2 页无图：原文原样，不被 OCR 动过
+    assert pages[1].text == "要点二"
+
+
+@pytest.mark.asyncio
+async def test_pdf_mixed_page_embedded_image_and_size_filter(tmp_path, monkeypatch):
+    """★ 混合页 PDF：文字层直读 + 大嵌入图识别；小图（<200px）跳过不烧显存。"""
+    import pymupdf
+    from PIL import Image
+
+    from app.ingest.ocr import EMBEDDED_IMAGE_MARKER, ocr_fill_pages
+    from app.ingest.parsers import parse_document
+
+    big = tmp_path / "chart.png"
+    Image.new("RGB", (300, 300), color=(20, 90, 200)).save(big)
+    small = tmp_path / "logo.png"
+    Image.new("RGB", (50, 50), color=(90, 90, 90)).save(small)
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((50, 50), "Text layer: gradient descent notes")
+    page.insert_image(pymupdf.Rect(50, 80, 250, 280), filename=str(big))   # 300px → 应识别
+    page.insert_image(pymupdf.Rect(50, 290, 100, 340), filename=str(small))  # 50px → 尺寸过滤
+    path = tmp_path / "mixed.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    fake = _FakeOcrGateway(active=[], reply="图表：实验数据曲线")
+    monkeypatch.setattr("app.ingest.ocr.gateway", fake)
+
+    pages, empty = parse_document(path)
+    assert empty == []  # 文字层存在 → 不走整页渲染
+    failed = await ocr_fill_pages(path, pages, empty)
+    assert failed == []
+
+    assert "gradient descent" in pages[0].text  # 文字层原样（未被重复渲染识别）
+    assert EMBEDDED_IMAGE_MARKER in pages[0].text
+    assert "实验数据曲线" in pages[0].text
+    # 只识别了大图：小图被尺寸过滤，整页也从未渲染（generate 恰好 1 次）
+    assert sum(1 for c in fake.calls if c[0] == "generate") == 1
 
 
 @pytest.mark.asyncio
