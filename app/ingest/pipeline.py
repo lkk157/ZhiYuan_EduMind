@@ -28,6 +28,7 @@ from app.db.crud import (
 from app.db.models import Document
 from app.ingest.chunker import chunk_pages
 from app.ingest.fingerprint import chunk_sha256, diff_chunks, file_sha256
+from app.ingest.ocr import ocr_fill_pages
 from app.ingest.parsers import parse_document
 from app.rag import vector_store
 from app.rag.vector_store import ChromaStore, store_for
@@ -151,8 +152,12 @@ async def ingest_file(
 
     doc: Document | None = existing
     try:
-        # b) 解析 + 切块（块绝不跨页；空文本页不产块，占位文本绝不进向量库）
+        # b) 解析 +（M3）OCR 回填 + 切块（块绝不跨页；空文本页不产块，占位文本绝不进向量库）
         pages, empty_pages = parse_document(file_path)
+        # OCR 回填：无文本层页/图片文件经 GLM-OCR 补文本（内部走显存互斥序列，
+        # 见 ocr.py）；仍失败的页保留在 empty_pages——可重传重试，不连坐已解析内容。
+        # 顺序不可换：必须在切块前回填，OCR 文本才能进块、进指纹、进向量库。
+        empty_pages = await ocr_fill_pages(file_path, pages, empty_pages)
         chunks = chunk_pages(pages, settings.chunk_size, settings.chunk_overlap)
 
         if doc is None:

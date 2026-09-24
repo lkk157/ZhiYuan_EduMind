@@ -38,8 +38,8 @@ def parse_document(path: Path) -> tuple[list[ParsedPage], list[int]]:
     - PPTX = 幻灯片序号（1 起）；
     - DOCX = 逻辑页序号（段落累积约 1000 字符切一页，段落不拆开）——Word 无稳定分页。
 
-    其他后缀抛 AppError(code=400)：入库只收这三种格式，宽进只会把乱码后缀喂给解析器，
-    与其在解析器深处报一个看不懂的错，不如在入口用人话拒绝。
+    其他后缀抛 AppError(code=400)：入库只收这四类格式（PDF/Word/PPT/图片），宽进只会把
+    乱码后缀喂给解析器，与其在解析器深处报一个看不懂的错，不如在入口用人话拒绝。
     """
     # 后缀大小写不敏感：Windows 用户常把 .PDF 扩展名改成大写
     suffix = path.suffix.lower()
@@ -58,7 +58,11 @@ def parse_document(path: Path) -> tuple[list[ParsedPage], list[int]]:
         from app.ingest.parsers.pptx_parser import parse_pptx
 
         return parse_pptx(path)
-    raise AppError(message="不支持的文件类型（仅支持 PDF/Word/PPT）", code=400)
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        from app.ingest.parsers.image_parser import parse_image
+
+        return parse_image(path)
+    raise AppError(message="不支持的文件类型（仅支持 PDF/Word/PPT/图片）", code=400)
 
 
 __all__ = ["ParsedPage", "parse_document"]

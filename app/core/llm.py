@@ -161,6 +161,17 @@ class OllamaGateway:
                 timeout=60.0,
             )
 
+    async def active_models(self) -> list[str]:
+        """查询当前驻留在显存中的模型名列表（Ollama /api/ps）。
+
+        为什么需要它：M3 的「OCR 前先卸 LLM」必须先确认 LLM 是否真的驻留——
+        对未加载的模型发 keep_alive=0 空生成，Ollama 会先加载再立刻卸载（白等几十秒）；
+        查一下再决定卸不卸，互斥序列既安全又不浪费。
+        这也是单测的缝：测试里 monkeypatch 本方法即可模拟「驻留/未驻留」两种时序。
+        """
+        data = await self._get_json("/api/ps")
+        return [m.get("name", "") for m in data.get("models", [])]
+
     async def health(self) -> dict:
         """健康检查：Ollama 是否连通 + 三个配置模型是否都在列。
 
