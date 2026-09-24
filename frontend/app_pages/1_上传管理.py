@@ -96,7 +96,7 @@ with st.popover("删除当前分组"):
 st.subheader("上传课件")
 st.caption(
     "支持 PDF / Word / PPT / 图片（png、jpg）。同名重传 = 增量更新（只重算变化块）；"
-    "含扫描页或图片的文档会经 OCR 识别，耗时略长。"
+    "含扫描页、图表或图片的文档会经 OCR 识别，耗时略长。"
 )
 with st.form("upload_form"):
     up = st.file_uploader("选择课件文件", type=["pdf", "docx", "pptx", "png", "jpg", "jpeg"])
