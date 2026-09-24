@@ -276,6 +276,98 @@ def test_ask_unrelated_question_falls_back(env, monkeypatch):
     assert body["answer"] == FALLBACK_MESSAGE
 
 
+# ===== 资料不足闸门（模型不知道就不输出来源，2026-09-24 产品需求）=====
+
+
+def test_insufficient_answer_falls_back_without_sources(env, monkeypatch):
+    """模型答「根据现有资料无法回答…」→ 整体走兜底：固定话术、无【来源】、sources=[]。"""
+    c = env["client"]
+    gid = c.post("/kb/groups", json={"name": "课件"}, headers=_auth(env["token_a"])).json()["id"]
+    c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", _docx_bytes([DOC_TEXT]))}, headers=_auth(env["token_a"]))
+
+    # 提问必须能命中检索（用与课件相关的问法）：本用例专测「检索到块、但模型判定
+    # 资料不足」的第二道闸门——若用无关提问，会在空检索分支就被兜底、LLM 根本不会被调
+    stub = _StubGateway("根据现有资料无法回答该知识点，资料中缺少相关章节。")
+    monkeypatch.setattr("app.api.chat.gateway", stub)
+
+    r = c.post(
+        "/chat/ask",
+        json={"question": "学习率过大会怎样", "group_ids": [gid]},
+        headers=_auth(env["token_a"]),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert stub.calls == 1  # LLM 确实被调了（本路径与空检索不同）
+    assert body["hit"] is False
+    assert body["answer"] == FALLBACK_MESSAGE
+    assert "来源" not in body["answer"]  # 未拼接【来源】
+    assert body["sources"] == []
+
+
+def test_insufficient_secondary_phrase_falls_back(env, monkeypatch):
+    """副判据：模型没按固定句式、但首句含强特征短语（很抱歉，资料中未提及…）→ 同样兜底。"""
+    c = env["client"]
+    gid = c.post("/kb/groups", json={"name": "课件"}, headers=_auth(env["token_a"])).json()["id"]
+    c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", _docx_bytes([DOC_TEXT]))}, headers=_auth(env["token_a"]))
+
+    stub = _StubGateway("很抱歉，资料中未提及该内容。")
+    monkeypatch.setattr("app.api.chat.gateway", stub)
+
+    r = c.post(
+        "/chat/ask",
+        json={"question": "学习率过大会怎样", "group_ids": [gid]},
+        headers=_auth(env["token_a"]),
+    )
+    body = r.json()
+    assert body["hit"] is False
+    assert body["answer"] == FALLBACK_MESSAGE
+    assert body["sources"] == []
+
+
+def test_normal_answer_with_bududiao_still_gets_sources(env, monkeypatch):
+    """★假阳性守卫：正文含「不知道」但有实质内容 → 照常命中、照常拼来源，绝不误杀。"""
+    c = env["client"]
+    gid = c.post("/kb/groups", json={"name": "课件"}, headers=_auth(env["token_a"])).json()["id"]
+    c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", _docx_bytes([DOC_TEXT]))}, headers=_auth(env["token_a"]))
+
+    stub = _StubGateway("很多同学不知道这个原理，正确做法是调小学习率或使用衰减策略。")
+    monkeypatch.setattr("app.api.chat.gateway", stub)
+
+    r = c.post(
+        "/chat/ask",
+        json={"question": "学习率过大会怎样", "group_ids": [gid]},
+        headers=_auth(env["token_a"]),
+    )
+    body = r.json()
+    assert body["hit"] is True
+    assert "【来源" in body["answer"]  # 真来源照常追加
+    assert body["sources"]  # 出口来源列表非空
+
+
+def test_insufficient_answer_persisted_as_fallback(env, monkeypatch):
+    """资料不足的轮次按 hit=false 落库——历史回看显示兜底样式、无来源卡片。"""
+    c = env["client"]
+    cid = c.post("/chat/conversations", json={"title": "不足测试"}, headers=_auth(env["token_a"])).json()["id"]
+    gid = c.post("/kb/groups", json={"name": "课件"}, headers=_auth(env["token_a"])).json()["id"]
+    c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", _docx_bytes([DOC_TEXT]))}, headers=_auth(env["token_a"]))
+
+    stub = _StubGateway("根据现有资料无法回答。")
+    monkeypatch.setattr("app.api.chat.gateway", stub)
+
+    r = c.post(
+        "/chat/ask",
+        json={"question": "学习率过大会怎样", "group_ids": [gid], "conversation_id": cid},
+        headers=_auth(env["token_a"]),
+    )
+    assert r.json()["hit"] is False
+
+    msgs = c.get(f"/chat/conversations/{cid}/messages", headers=_auth(env["token_a"])).json()
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[1]["hit"] is False
+    assert msgs[1]["content"] == FALLBACK_MESSAGE
+    assert msgs[1]["sources"] == []
+
+
 # ===== 越权防线 =====
 
 

@@ -33,6 +33,7 @@ from app.rag.prompts import (
     FALLBACK_MESSAGE,
     append_sources,
     build_qa_prompt,
+    is_insufficient_answer,
     sanitize_answer,
 )
 from app.rag.retriever import retrieve
@@ -101,6 +102,31 @@ def _load_sources(raw: str | None) -> list[dict]:
     except (json.JSONDecodeError, TypeError):
         return []
     return parsed if isinstance(parsed, list) else []
+
+
+def _persist_and_return_fallback(db, conversation, body) -> dict:
+    """两条兜底路径共用的出口：可选落库 + 统一返回（固定话术/hit=false/空来源）。
+
+    为什么抽成一个函数：「空检索」与「模型判定资料不足」两条路径的响应与落库口径
+    必须**逐字节一致**——分开写迟早漂移（比如一条落库一条忘了），单测也就没法用
+    同一组断言锁两种触发方式。契约：hit=false ⇒ answer 恒为 FALLBACK_MESSAGE、
+    sources 恒为空，前端与历史回看的兜底样式因此只有一套。
+    """
+    if conversation is not None:
+        crud.append_message_pair(
+            db,
+            conversation=conversation,
+            question=body.question,
+            answer=FALLBACK_MESSAGE,
+            hit=False,
+            sources_json="[]",
+        )
+    return {
+        "answer": FALLBACK_MESSAGE,
+        "sources": [],
+        "hit": False,
+        "conversation_id": body.conversation_id,
+    }
 
 
 # ===== 会话历史 CRUD（挂 /chat 前缀：与问答同域，不另开路由树）=====
@@ -173,8 +199,11 @@ async def ask(
     """知识库问答：检索 → （命中）生成带溯源的答案 / （未命中）兜底且不调 LLM。
 
     返回 {answer, sources:[{file_name,page_no,snippet}], hit, conversation_id}。
-    hit=false 时 answer 恒为 FALLBACK_MESSAGE、sources 恒为空——防幻觉硬闸门所在。
-    conversation_id 原样回显（None=本次未落库）。
+    hit=false 有且只有两条路径，口径完全一致（_persist_and_return_fallback 统一出口）：
+    ① 空检索——根本不调 LLM（防幻觉硬闸门，第一道）；
+    ② 检索到但模型判定「根据现有资料无法回答」——不拼来源、回固定话术
+      （资料不足闸门，第二道，2026-09-24 产品需求：不知道就不输出来源）。
+    两条路径 answer 恒为 FALLBACK_MESSAGE、sources 恒为空；conversation_id 原样回显。
     """
     # 0) 会话归属先校验（fail fast）：拿别人的 conversation_id 提前 404，
     #    别等检索/生成烧完一轮显存才发现没权限——浪费推理还把越权拖到耗时操作之后
@@ -200,28 +229,14 @@ async def ask(
     # 2) 检索：阈值过滤 + top_k 截断在 retriever 内完成（宁缺毋滥是防幻觉第一道闸）
     chunks = await retrieve(body.question, user_id=user.id, group_ids=group_ids)
 
-    # 3) ★ 防幻觉硬闸门：未命中立即兜底返回，严禁调用 gateway.generate——
+    # 3) ★ 防幻觉硬闸门（第一道）：未命中立即兜底返回，严禁调用 gateway.generate——
     #    没有资料还让 7B 作答 = 百分之百编造；兜底话术引导用户换问法或先传资料。
     #    （本分支是否真的不碰 LLM 是单测的重点断言，改动前先想清楚卖点还在不在）
     #    兜底问答同样落库：用户回看时必须看到「这轮没命中」，历史不许选择性失忆。
     if not chunks:
-        if conversation is not None:
-            crud.append_message_pair(
-                db,
-                conversation=conversation,
-                question=body.question,
-                answer=FALLBACK_MESSAGE,
-                hit=False,
-                sources_json="[]",
-            )
-        return {
-            "answer": FALLBACK_MESSAGE,
-            "sources": [],
-            "hit": False,
-            "conversation_id": body.conversation_id,
-        }
+        return _persist_and_return_fallback(db, conversation, body)
 
-    # 4) 命中：编排提示词 → 生成 → 净化伪来源 → 强制追加真来源
+    # 4) 命中：编排提示词 → 生成 → 净化伪来源 → ★资料不足闸门（第二道）→ 拼真来源
     system, prompt = build_qa_prompt(body.question, chunks)
     raw = await gateway.generate(
         model=settings.llm_model,  # 模型名只从配置读，禁止硬编码（CLAUDE.md §5）
@@ -230,9 +245,19 @@ async def ask(
         num_predict=512,  # 输出长度受控（显存红线），答案不做长文生成
         temperature=0.3,  # 低温度：问答要忠于资料，减少发挥
     )
-    answer = append_sources(sanitize_answer(raw), chunks)
+    answer = sanitize_answer(raw)
 
-    # 5) sources 与 append_sources 同序同去重（(file_name, page_no) 去重保序），
+    # ★ 资料不足闸门（2026-09-24 产品需求）：检索擦边命中了一些块，但模型判定
+    # 资料其实答不上——此时拼【来源】等于「嘴上说不知道、脚下引出处」，自相矛盾。
+    # 整体走兜底口径（Option A）：固定话术 + hit=false + 空来源，契约与前端零改动；
+    # 判定在拼来源之前，来源根本不会被生成——闸门位置是本分支存在的全部意义。
+    if is_insufficient_answer(answer):
+        return _persist_and_return_fallback(db, conversation, body)
+
+    # 5) 正常命中：强制追加真来源
+    answer = append_sources(answer, chunks)
+
+    # 6) sources 与 append_sources 同序同去重（(file_name, page_no) 去重保序），
     #    保证前端出处列表 == 答案末尾【来源】；snippet 取该块前约 80 字供用户核对
     sources: list[dict] = []
     seen: set[tuple[str, int]] = set()
@@ -249,7 +274,7 @@ async def ask(
             }
         )
 
-    # 6) 会话落库（可选）：sources 用 ensure_ascii=False 存原文——
+    # 7) 会话落库（可选）：sources 用 ensure_ascii=False 存原文——
     #    中文不转 \uXXXX，运维直接 SELECT * 也能读懂，回看还原零损耗
     if conversation is not None:
         crud.append_message_pair(

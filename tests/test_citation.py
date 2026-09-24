@@ -29,7 +29,8 @@ def test_build_qa_prompt_contains_rules_and_materials():
     """system 四条铁律 + 资料带编号/文件名/页码 + 问题原文，一个都不能少。"""
     chunks = [_chunk("学习率过大会震荡", "讲义.docx", 3)]
     system, prompt = build_qa_prompt("学习率过大会怎样？", chunks)
-    assert "不知道" in system  # 资料不足就说不知道
+    # 资料不足的固定句式（2026-09-24 起）：代码层按该前缀判定「模型不知道」→ 兜底不拼来源
+    assert "根据现有资料无法回答" in system
     assert "来源" in system  # 禁止自写来源
     assert "[1] (文件:讲义.docx, 第3页)" in prompt
     assert "学习率过大会震荡" in prompt
