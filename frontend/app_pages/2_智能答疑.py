@@ -49,17 +49,26 @@ with st.sidebar:
     # dict 每次拉取都是新对象、message_count 还会变，存 dict 会让选择态因「值不相等」而失焦
     options = [None] + [c["id"] for c in conversations]
 
-    # —— 回填同步（必须在 selectbox 实例化之前）——
-    # 新建会话/删除会话发生在主区（widget 已实例化，之后改 st.session_state[key] 会抛
-    # StreamlitAPIException），只能留到下一次重跑、在实例化前把选择器拉齐到当前会话：
-    #   chat_conv_id=X 而 selector 还是 None → 回填 X（新建后选中新会话）
-    #   chat_conv_id=None 而 selector 还是旧 id → 回填 None（删除/新对话后回到哨兵）
-    if st.session_state.get("chat_conv_id") != st.session_state.get("conv_selector"):
-        if st.session_state.get("chat_conv_id") in options:
-            st.session_state["conv_selector"] = st.session_state["chat_conv_id"]
+    # —— 选择器回填（必须在 selectbox 实例化之前消费；实例化后改 key 会抛异常）——
+    # ★踩坑记录（2026-09-24 实测）：最初这里写的是「chat_conv_id != conv_selector
+    # 就把选择器拉回 chat_conv_id」，结果是灾难——Streamlit 用户点选 selectbox 时
+    # 会先把新值写进 session_state 再重跑脚本，这段「对齐」把用户的每次点选都在
+    # 脚本开头弹回原值：点「＋ 新对话」弹回旧会话（新建不了）、登录后点旧对话弹回
+    # 哨兵（回不去）。根因：「值不等」分不清是【用户点选】还是【主区新建/删除】两种方向。
+    # 修法：方向必须显式——只有主区（新建会话处）写 conv_selector_pending 信号，
+    # 侧边栏只消费信号、绝不主动猜测对齐；用户点选由切换检测分支自己处理。
+    if "conv_selector_pending" in st.session_state:
+        st.session_state["conv_selector"] = st.session_state.pop("conv_selector_pending")
+
+    # 首次进入本页（登录后 conv_selector 尚未存在）：默认选中最近活跃会话——
+    # 「重新登录还能回到旧对话」的产品语义就落在这里；无会话则停留在新对话哨兵。
+    # （放在 pending 消费之后：新建流程里 key 已存在，不会被误覆盖）
+    if "conv_selector" not in st.session_state and conversations:
+        st.session_state["conv_selector"] = conversations[0]["id"]
 
     # 陈旧夹紧：选择器残留的 id 若已不在列表（被删/换账号），先归 None 再渲染，
-    # 否则 selectbox 拿着无效值实例化会越界报错（与文档列表分页夹紧同一手法）
+    # 否则 selectbox 拿着无效值实例化会越界报错（与文档列表分页夹紧同一手法）。
+    # 删除当前会话后的归位也由它兜底：旧 id 已不在列表 → 夹回新对话哨兵。
     if st.session_state.get("conv_selector") not in options:
         st.session_state["conv_selector"] = None
 
@@ -77,8 +86,9 @@ with st.sidebar:
                 msgs = client.list_messages(selected)
             except ApiError as e:
                 st.error(e.message)
-                # 不在这里改 conv_selector（widget 已实例化）；把当前会话置空，
-                # 下次重跑由上面的回填/夹紧逻辑把选择器归位，避免每轮循环报错
+                # 不在这里改 conv_selector（widget 已实例化）；把当前会话置空——
+                # 若该会话已不在列表，下次重跑由「陈旧夹紧」归位到新对话哨兵；
+                # 若只是瞬时网络错（会话还在），下次重跑会自然重试加载
                 st.session_state.chat_conv_id = None
                 st.session_state.chat_history = []
             else:
@@ -135,7 +145,8 @@ if history:
         except ApiError as e:
             st.error(e.message)
             st.stop()
-        # 本地状态归零：chat_conv_id 置 None，下次重跑由侧边栏回填逻辑把选择器归位
+        # 本地状态归零；选择器归位交给下次重跑的「陈旧夹紧」——
+        # 旧 id 已从列表消失，夹紧逻辑会把它带回新对话哨兵（无需再写 pending）
         st.session_state.chat_history = []
         st.session_state.chat_conv_id = None
         st.rerun()
@@ -163,9 +174,10 @@ if prompt:
                 st.error(e.message)
                 st.stop()
             conv_id = conv["id"]
-            # 只写 chat_conv_id（当前会话），conv_selector 留到下次重跑回填——
-            # 此刻 widget 已实例化，直接改它的 key 会抛 StreamlitAPIException
+            # 此刻 selectbox 已实例化，不能直接改 conv_selector（会抛异常）——
+            # 写 pending 信号，由下一次重跑的侧边栏在实例化前消费回填（见侧边栏注释）
             st.session_state.chat_conv_id = conv_id
+            st.session_state["conv_selector_pending"] = conv_id
 
         try:
             # group_ids 显式传选中分组（后端还会逐个校验归属，防越权检索）
