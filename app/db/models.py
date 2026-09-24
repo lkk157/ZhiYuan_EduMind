@@ -1,15 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-ORM 表模型。M1 建 users；M2 建知识库三件套（kb_groups / documents / chunk_fingerprints）。
+ORM 表模型。M1 建 users；M2 建知识库三件套（kb_groups / documents / chunk_fingerprints）；
+RAG 完善阶段补会话历史两件套（conversations / messages）。
 
-为什么不一次建全 ROADMAP 里的十几张表（消息/日志/记忆……）：
+为什么不一次建全 ROADMAP 里的十几张表（日志/记忆/错题……）：
 「一个阶段只做一个阶段的事」（CLAUDE.md §2）——空表堆积只会增加维护成本，
-后续表随各自功能（M3 消息表、M7 记忆表）在对应里程碑落地。
+后续表随各自功能（M4 滑窗直接复用本文件会话两表、M5 记忆表、M6 日志表）在对应里程碑落地。
 所有核心业务表都会带 user_id 外键（生产思维 #4：多端数据一致性靠它隔离）。
 """
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -168,6 +179,91 @@ class ChunkFingerprint(Base):
         )
 
 
+class Conversation(Base):
+    """问答会话表：一次连续答疑 = 一行，消息（Message）挂在其下（会话历史的父表）。
+
+    为什么标题由首问截取而不是让 LLM 起标题：历史保存是纯 DB 功能，
+    引入一次「LLM 起标题」就把本阶段「零新增模型调用、不碰显存红线」的承诺破坏了；
+    会话列表对标题精度要求低，首问前 30 字足够辨识（生成端见前端 create 调用处）。
+
+    为什么没有唯一约束：同名会话（如多个「新对话」）在产品上完全合法——
+    这与 kb_groups 的「分组名按用户唯一」语义不同：那边唯一是为了防前端
+    name→id 映射歧义；会话列表一律用 id 做键，重名无害，强加唯一反而逼用户改名。
+
+    为什么 updated_at 要随消息追加刷新（onupdate）：会话列表按最近活跃倒序排，
+    每次问答都更新父行时间戳，用户打开页面一眼看到「最近在聊的对话」。
+    """
+
+    __tablename__ = "conversations"
+
+    # 主键方言适配与 User.id 同理（原因见文件头 with_variant 注释）
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    # 归属人：一切会话读写先过 user_id 过滤（越权防线与分组/文档同款防探测纪律）
+    user_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_conversations_user"),
+    )
+    title: Mapped[str] = mapped_column(String(128), default="新对话")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # onupdate=func.now()：对该行做 UPDATE 时数据库端自动刷新（与 documents 同款），
+    # 保证与 created_at 用的是同一个数据库时钟，排序不会混进应用机本地时间
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<Conversation id={self.id} user_id={self.user_id} title={self.title!r}>"
+
+
+class Message(Base):
+    """会话消息表：一问（role=user）一答（role=assistant）各一行。
+
+    为什么 hit/sources 必须落库：回看历史要还原「命中徽章 + 来源卡片」——
+    本项目卖点是溯源，历史里丢了来源，回看时卖点就消失了；
+    sources 整体 JSON 序列化存字符串列，不拆关系表：问答产物是一次性读写的整体，
+    拆表只有坏处，且与 documents.empty_pages 同一取舍（MySQL/SQLite 同构、避开 JSON 方言差异）。
+
+    为什么 hit 可空（NULL）而不是默认 False：用户提问行没有「命中」语义，
+    存 NULL 让读侧结构上无法把「用户消息」误判成「兜底回答」（False 是兜底的语义）。
+
+    为什么挂 conversation_id 索引：回看按会话整取消息（WHERE conversation_id=? ORDER BY id），
+    会话一多没有索引就是全表扫（生产思维——索引在建表时就位，不等慢了再补）。
+    """
+
+    __tablename__ = "messages"
+    # 建索引：列表页按会话取消息的唯一查询路径（与 users.username 同思路）
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("conversations.id", ondelete="CASCADE", name="fk_messages_conversation"),
+        index=True,
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    # "user" / "assistant"：与前端 chat_message 角色、OpenAI 惯例对齐，禁止发明第三种值
+    role: Mapped[str] = mapped_column(String(16))
+    # Text 而非 String：答案可达数百字，MySQL 的 VARCHAR 上限与语义都不如 TEXT 贴切
+    content: Mapped[str] = mapped_column(Text)
+    # None=用户消息（无命中语义）；True/False=助手回答是否命中知识库
+    hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    # JSON 字符串（如 [{"file_name":..,"page_no":..,"snippet":..}]），出口用 json.loads 还原
+    sources: Mapped[str] = mapped_column(Text, default="[]")
+    # 回看时展示时间线；排序仍以 id 为准（自增单调，不受同秒并列影响）
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    def __repr__(self) -> str:
+        return (
+            f"<Message id={self.id} conversation_id={self.conversation_id} "
+            f"role={self.role!r}>"
+        )
+
+
 def join_empty_pages(pages: list[int]) -> str:
     """把无文本层页码列表编码成逗号拼接字符串（如 [2, 5] -> "2,5"）。
 
@@ -193,6 +289,8 @@ __all__ = [
     "KbGroup",
     "Document",
     "ChunkFingerprint",
+    "Conversation",
+    "Message",
     "join_empty_pages",
     "split_empty_pages",
 ]

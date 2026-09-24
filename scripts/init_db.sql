@@ -5,8 +5,8 @@
 -- 为什么统一 utf8mb4：MySQL 8 默认 utf8mb3 存不下 emoji/生僻字且中文易乱码，
 -- 建库建表连接三处（库/表/连接串）统一 utf8mb4 才彻底（ROADMAP 风险 R4）。
 --
--- 表随里程碑增量追加（M1 users → M2 知识库三件套），唯一键/索引名与
--- app/db/models.py 保持一致（uk_* 前缀），两套 DDL 不许漂移。
+-- 表随里程碑增量追加（M1 users → M2 知识库三件套 → RAG完善 会话两件套），
+-- 唯一键/索引/外键名与 app/db/models.py 保持一致（uk_*/idx_*/fk_* 前缀），两套 DDL 不许漂移。
 -- ============================================================
 
 CREATE DATABASE IF NOT EXISTS zhiyuan
@@ -84,4 +84,40 @@ CREATE TABLE IF NOT EXISTS chunk_fingerprints (
   UNIQUE KEY uk_chunks_doc_index (document_id, chunk_index),
   CONSTRAINT fk_chunks_document FOREIGN KEY (document_id)
     REFERENCES documents (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 会话表（RAG完善 会话历史）：一次连续答疑一行；updated_at 随消息追加刷新，
+-- 列表按 (updated_at DESC, id DESC) 倒序=最近活跃在前。
+-- 标题允许重名（无唯一约束）——与 kb_groups 分组名唯一语义不同，会话列表以 id 为键。
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS conversations (
+  id         BIGINT       NOT NULL AUTO_INCREMENT,
+  user_id    BIGINT       NOT NULL,
+  title      VARCHAR(128) NOT NULL DEFAULT '新对话',
+  created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                           ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_conversations_user FOREIGN KEY (user_id)
+    REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- 消息表（RAG完善 会话历史）：一问一答各一行；hit 可空（用户行 NULL，
+-- 助手行 True/False）；sources 存 JSON 字符串（与 empty_pages 同构取舍）。
+-- idx_messages_conversation：回看按会话整取消息的查询路径。
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS messages (
+  id              BIGINT       NOT NULL AUTO_INCREMENT,
+  conversation_id BIGINT       NOT NULL,
+  role            VARCHAR(16)  NOT NULL,
+  content         TEXT         NOT NULL,
+  hit             TINYINT(1)   NULL,
+  sources         TEXT         NOT NULL,
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_messages_conversation (conversation_id, id),
+  CONSTRAINT fk_messages_conversation FOREIGN KEY (conversation_id)
+    REFERENCES conversations (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

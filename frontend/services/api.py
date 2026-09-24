@@ -121,11 +121,42 @@ class ApiClient:
 
     # ---------- 问答 ----------
 
-    def ask(self, question: str, group_ids: list[int] | None = None) -> dict:
-        """提问。group_ids=None=检索本人全部分组；返回 {answer, sources, hit}。"""
+    def ask(
+        self,
+        question: str,
+        group_ids: list[int] | None = None,
+        conversation_id: int | None = None,
+    ) -> dict:
+        """提问。group_ids=None=检索本人全部分组；返回 {answer, sources, hit, conversation_id}。
+
+        conversation_id=None 时后端不落库（无状态，兼容旧行为）；
+        传了则一问一答写入该会话（回看历史靠它）。
+        """
         return self._request(
             "POST",
             "/chat/ask",
-            json={"question": question, "group_ids": group_ids},
+            json={
+                "question": question,
+                "group_ids": group_ids,
+                "conversation_id": conversation_id,
+            },
             timeout=_LONG_TIMEOUT,  # 7B 生成可能到分钟级（含模型冷加载）
         )
+
+    # ---------- 会话历史 ----------
+
+    def create_conversation(self, title: str) -> dict:
+        """新建空会话，返回 {id, title}（前端首问前调用，标题=首问截 30 字）。"""
+        return self._request("POST", "/chat/conversations", json={"title": title})
+
+    def list_conversations(self) -> list:
+        """列本人全部会话（含 message_count，按最近活跃倒序）——侧边栏数据源。"""
+        return self._request("GET", "/chat/conversations")
+
+    def list_messages(self, conversation_id: int) -> list:
+        """取某会话全部消息（时间正序），用于切换会话时回看渲染。"""
+        return self._request("GET", f"/chat/conversations/{conversation_id}/messages")
+
+    def delete_conversation(self, conversation_id: int) -> dict:
+        """删除会话（服务端级联删消息）。"""
+        return self._request("DELETE", f"/chat/conversations/{conversation_id}")

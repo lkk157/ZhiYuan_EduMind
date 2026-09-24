@@ -24,15 +24,22 @@ st.set_page_config(page_title="知源 ZhiYuan", page_icon=":material/school:", l
 # ---- 会话状态集中初始化（一处 setdefault，避免散落赋值引发 KeyError / 串号）----
 st.session_state.setdefault("token", None)
 st.session_state.setdefault("username", None)
-st.session_state.setdefault("chat_history", [])  # 答疑页会话内历史（M2 无后端落库，属 M5 记忆范畴）
+st.session_state.setdefault("chat_history", [])  # 答疑页当前会话的消息缓存（服务端 MySQL 为事实源）
+st.session_state.setdefault("chat_conv_id", None)  # 当前会话 id（None=新对话，首问时才创建）
 st.session_state.setdefault("upload_report", None)  # 最近一次入库结果（跨一次重跑展示）
 
 
 def _reset_session() -> None:
-    """退出/切换账号时清空全部会话态——不留上一个用户的聊天记录（隐私底线）。"""
+    """退出/切换账号时清空全部会话态——不留上一个用户的聊天记录（隐私底线）。
+
+    conv_selector 是会话选择器 widget 的 session key，必须 pop 而不是赋 None：
+    留着上一个用户的会话 id，换人登录后选择器会拿着别人的 id 打接口（404 串号噪音）。
+    """
     st.session_state.token = None
     st.session_state.username = None
     st.session_state.chat_history = []
+    st.session_state.chat_conv_id = None
+    st.session_state.pop("conv_selector", None)
     st.session_state.upload_report = None
 
 

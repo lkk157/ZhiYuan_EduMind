@@ -12,7 +12,13 @@
 - 模型自写的【来源…】一律 sanitize_answer 删掉（那是幻觉重灾区）；
 - 真来源由 append_sources 按真实命中统一追加，sources 列表与它同序同去重，
   保证前端展示的出处与答案末尾的【来源】永远一致。
+
+会话历史（2026-09-24）：/chat/conversations* 四个端点 + ask 可选 conversation_id 落库。
+落库只是「记录」不改变生成路径——检索仍旧只看当前 question（多轮上下文/query 改写属 M4），
+本文件新增的全部是 DB 读写，零新增模型调用（显存红线自查通过）。
 """
+import json
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
@@ -43,10 +49,119 @@ class AskRequest(BaseModel):
 
     group_ids 可缺省：缺省=检索本人全部分组（最常见的「随便问」场景）；
     显式传了则只在指定分组里检索（比如「只问高数分组」），且逐个校验归属。
+
+    conversation_id 可缺省（2026-09-24 会话历史改版引入）：
+    缺省 = 不落库（无状态问答）——现有单测与 demo_e2e.py 零改动、行为完全不变；
+    显式给了 = 一问一答写入该会话，且先校验归属（非本人 404 防探测）。
+    「不传不保存」的语义边界比「不传就自动建会话」更安全：
+    后者会让脚本类调用（demo/压测）每次请求都污染会话列表。
     """
 
     question: str
     group_ids: list[int] | None = None
+    conversation_id: int | None = None
+
+
+class ConversationCreateRequest(BaseModel):
+    """新建会话入参。title 允许超长（接口层截断到 128），
+    避免 pydantic 422 把「首问很长」这种正常输入拒之门外。"""
+
+    title: str = ""
+
+
+def _require_conversation(db, *, user_id: int, conversation_id: int):
+    """取本人会话，取不到（不存在或非本人）一律 NotFoundError（理由同 kb._require_group：
+    报 403 等于承认 id 存在，可被枚举探测）。"""
+    conversation = crud.get_conversation(db, user_id=user_id, conversation_id=conversation_id)
+    if conversation is None:
+        raise NotFoundError("会话不存在")
+    return conversation
+
+
+def _serialize_messages(messages) -> list[dict]:
+    """Message 行 → 接口契约：sources JSON 字符串还原成 list[dict]，hit 保持 True/False/None。"""
+    return [
+        {
+            "role": m.role,
+            "content": m.content,
+            "hit": m.hit,
+            # 库里存 JSON 字符串（MySQL/SQLite 同构取舍），出口还原成结构化列表；
+            # 解析失败按空列表容错（坏数据不许 500，历史读取永远可用）
+            "sources": _load_sources(m.sources),
+            "created_at": m.created_at,
+        }
+        for m in messages
+    ]
+
+
+def _load_sources(raw: str | None) -> list[dict]:
+    """sources 列（JSON 字符串）→ list[dict]，坏数据静默降级为空列表。"""
+    try:
+        parsed = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+# ===== 会话历史 CRUD（挂 /chat 前缀：与问答同域，不另开路由树）=====
+
+
+@router.post("/conversations", status_code=201)
+def create_conversation(
+    body: ConversationCreateRequest,
+    user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """新建空会话，返回 {id, title}。
+
+    标题兜底逻辑：空/纯空白 → 「新对话」；超 128 截断（前端通常已截 30 字，
+    这里是服务端复校——客户端限制不是安全边界，与批量上传同款纪律）。
+    """
+    title = (body.title or "").strip()[:128] or "新对话"
+    conversation = crud.create_conversation(db, user_id=user.id, title=title)
+    return {"id": conversation.id, "title": conversation.title}
+
+
+@router.get("/conversations")
+def list_conversations(
+    user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """列本人全部会话（含消息数），按最近活跃倒序——前端侧边栏会话列表的数据源。"""
+    rows = crud.list_conversations(db, user_id=user.id)
+    return [
+        {
+            "id": c.id,
+            "title": c.title,
+            "message_count": count,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+        }
+        for c, count in rows
+    ]
+
+
+@router.get("/conversations/{cid}/messages")
+def list_messages(
+    cid: int,
+    user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """取某会话全部消息（时间正序）。非本人/不存在 → 404（防探测）。"""
+    _require_conversation(db, user_id=user.id, conversation_id=cid)
+    return _serialize_messages(crud.list_messages(db, user_id=user.id, conversation_id=cid))
+
+
+@router.delete("/conversations/{cid}")
+def delete_conversation(
+    cid: int,
+    user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """删除会话（级联删消息，crud 手工级联保证 SQLite/MySQL 都不留孤儿）。"""
+    _require_conversation(db, user_id=user.id, conversation_id=cid)
+    crud.delete_conversation(db, user_id=user.id, conversation_id=cid)
+    return {"ok": True}
 
 
 @router.post("/ask")
@@ -57,9 +172,18 @@ async def ask(
 ):
     """知识库问答：检索 → （命中）生成带溯源的答案 / （未命中）兜底且不调 LLM。
 
-    返回 {answer, sources:[{file_name,page_no,snippet}], hit}。
+    返回 {answer, sources:[{file_name,page_no,snippet}], hit, conversation_id}。
     hit=false 时 answer 恒为 FALLBACK_MESSAGE、sources 恒为空——防幻觉硬闸门所在。
+    conversation_id 原样回显（None=本次未落库）。
     """
+    # 0) 会话归属先校验（fail fast）：拿别人的 conversation_id 提前 404，
+    #    别等检索/生成烧完一轮显存才发现没权限——浪费推理还把越权拖到耗时操作之后
+    conversation = None
+    if body.conversation_id is not None:
+        conversation = _require_conversation(
+            db, user_id=user.id, conversation_id=body.conversation_id
+        )
+
     # 1) 分组权限边界：缺省=本人全部分组；显式给了必须逐个确认归属，
     #    否则借别人 group_id 提问等于跨用户检索（数据泄漏），一律 NotFoundError 防探测
     if body.group_ids is None:
@@ -79,8 +203,23 @@ async def ask(
     # 3) ★ 防幻觉硬闸门：未命中立即兜底返回，严禁调用 gateway.generate——
     #    没有资料还让 7B 作答 = 百分之百编造；兜底话术引导用户换问法或先传资料。
     #    （本分支是否真的不碰 LLM 是单测的重点断言，改动前先想清楚卖点还在不在）
+    #    兜底问答同样落库：用户回看时必须看到「这轮没命中」，历史不许选择性失忆。
     if not chunks:
-        return {"answer": FALLBACK_MESSAGE, "sources": [], "hit": False}
+        if conversation is not None:
+            crud.append_message_pair(
+                db,
+                conversation=conversation,
+                question=body.question,
+                answer=FALLBACK_MESSAGE,
+                hit=False,
+                sources_json="[]",
+            )
+        return {
+            "answer": FALLBACK_MESSAGE,
+            "sources": [],
+            "hit": False,
+            "conversation_id": body.conversation_id,
+        }
 
     # 4) 命中：编排提示词 → 生成 → 净化伪来源 → 强制追加真来源
     system, prompt = build_qa_prompt(body.question, chunks)
@@ -109,4 +248,21 @@ async def ask(
                 "snippet": chunk.text[:SNIPPET_LEN],
             }
         )
-    return {"answer": answer, "sources": sources, "hit": True}
+
+    # 6) 会话落库（可选）：sources 用 ensure_ascii=False 存原文——
+    #    中文不转 \uXXXX，运维直接 SELECT * 也能读懂，回看还原零损耗
+    if conversation is not None:
+        crud.append_message_pair(
+            db,
+            conversation=conversation,
+            question=body.question,
+            answer=answer,
+            hit=True,
+            sources_json=json.dumps(sources, ensure_ascii=False),
+        )
+    return {
+        "answer": answer,
+        "sources": sources,
+        "hit": True,
+        "conversation_id": body.conversation_id,
+    }
