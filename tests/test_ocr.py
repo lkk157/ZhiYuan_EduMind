@@ -210,6 +210,59 @@ async def test_pptx_picture_only_slide_backfilled(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_identical_reupload_retries_ocr_when_pages_pending(
+    tmp_path, db_session, monkeypatch, fake_embed_fn
+):
+    """文件级短路不许吃掉 OCR 重试：首传 OCR 失败留 empty_pages，同文件重传必须重新识别。"""
+    import chromadb
+
+    from app.db import crud
+    from app.ingest.pipeline import ingest_file
+    from app.rag import embeddings
+    from app.rag.vector_store import ChromaStore
+
+    eph = chromadb.EphemeralClient()
+
+    def fake_store_for(user_id, group_id, client=None):
+        return ChromaStore(collection=f"u{user_id}g{group_id}", client=eph)
+
+    monkeypatch.setattr("app.rag.vector_store.store_for", fake_store_for)
+    monkeypatch.setattr("app.ingest.pipeline.store_for", fake_store_for)
+    monkeypatch.setattr(embeddings, "embed_texts", fake_embed_fn)
+
+    user = crud.create_user(db_session, username="retry_user", password_hash="x")
+    group = crud.create_kb_group(db_session, user_id=user.id, name="重试")
+    path = tmp_path / "pic.png"
+    path.write_bytes(_png_bytes())
+
+    # 首传：OCR 故障 → 页保留 empty_pages、0 块入库（不连坐）
+    monkeypatch.setattr("app.ingest.ocr.gateway", _FakeOcrGateway(active=[], fail=True))
+    first = await ingest_file(
+        db_session, user_id=user.id, group_id=group.id, file_name="pic.png", file_path=path
+    )
+    assert first.empty_pages == [1]
+    assert first.chunk_count == 0
+    assert first.skipped_identical is False
+
+    # 同文件重传（哈希完全一致）：因 empty_pages 非空不许短路 → OCR 重试成功 → 补块入库
+    monkeypatch.setattr(
+        "app.ingest.ocr.gateway", _FakeOcrGateway(active=[], reply="重试成功的识别文本")
+    )
+    second = await ingest_file(
+        db_session, user_id=user.id, group_id=group.id, file_name="pic.png", file_path=path
+    )
+    assert second.skipped_identical is False  # 短路被 empty_pages 例外放行
+    assert second.empty_pages == []
+    assert second.added >= 1
+
+    # 对照：再次重传（empty_pages 已清空）→ 文件级短路恢复生效
+    third = await ingest_file(
+        db_session, user_id=user.id, group_id=group.id, file_name="pic.png", file_path=path
+    )
+    assert third.skipped_identical is True
+
+
+@pytest.mark.asyncio
 async def test_pipeline_end_to_end_image_ingest(tmp_path, db_session, monkeypatch, fake_embed_fn):
     """图片文件走完整 ingest_file：OCR 回填 → 切块 → 假向量入库 → empty_pages 清空。"""
     from app.db import crud

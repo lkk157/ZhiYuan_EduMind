@@ -25,7 +25,7 @@ from app.db.crud import (
     replace_chunk_fingerprints,
     update_document_meta,
 )
-from app.db.models import Document
+from app.db.models import Document, split_empty_pages
 from app.ingest.chunker import chunk_pages
 from app.ingest.fingerprint import chunk_sha256, diff_chunks, file_sha256
 from app.ingest.ocr import ocr_fill_pages
@@ -135,7 +135,16 @@ async def ingest_file(
     existing = get_document_by_name(
         db, user_id=user_id, group_id=group_id, file_name=file_name
     )
-    if existing is not None and existing.file_hash == file_hash and existing.status == "ready":
+    # ★ 短路例外：empty_pages 非空（上次 OCR 有失败页/待识别页）时同文件重传必须放行——
+    # 否则「内容没变」的短路会把 OCR 重试吃掉，前端承诺的「重新上传可重试」就是空话。
+    # 放行后走完整流水线：OCR 成功则回填出新块（added>0），仍失败则 diff 全 unchanged，零浪费。
+    pending_ocr = bool(split_empty_pages(existing.empty_pages)) if existing is not None else False
+    if (
+        existing is not None
+        and existing.file_hash == file_hash
+        and existing.status == "ready"
+        and not pending_ocr
+    ):
         # 契约口径：skipped_identical=True 时「其余计数 0」——本轮没做任何入库动作，
         # 计数一律 0（含 page_count/chunk_count），doc_id 供前端定位文档行
         return IngestResult(
