@@ -133,14 +133,18 @@ def test_validation_error_uses_unified_format(env):
 
 
 def test_upload_incremental_and_skip_and_change(env):
-    """上传→增量计数；同名同内容重传 skipped_identical；改内容重传 changed>=1。"""
+    """上传→增量计数；同名同内容重传 skipped_identical；改内容重传 changed>=1（批量契约）。"""
     c = env["client"]
     gid = c.post("/kb/groups", json={"name": "课件"}, headers=_auth(env["token_a"])).json()["id"]
     data = _docx_bytes([DOC_TEXT])
 
     r = c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", data)}, headers=_auth(env["token_a"]))
     assert r.status_code == 200
-    result = r.json()
+    body = r.json()
+    # 批量响应契约：{results:[...], succeeded, failed}（单文件 = results 一项）
+    assert body["succeeded"] == 1 and body["failed"] == 0
+    result = body["results"][0]
+    assert result["ok"] is True
     assert result["skipped_identical"] is False
     assert result["added"] >= 1
     assert result["page_count"] == 1
@@ -153,14 +157,60 @@ def test_upload_incremental_and_skip_and_change(env):
 
     # 同名同内容重传：文件级指纹短路
     r = c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", data)}, headers=_auth(env["token_a"]))
-    assert r.json()["skipped_identical"] is True
+    assert r.json()["results"][0]["skipped_identical"] is True
 
     # 同名改内容重传：chunk 级增量（0 号块 hash 变了 → changed）
     data2 = _docx_bytes([DOC_TEXT + "补充：应使用学习率衰减。"])
     r = c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", data2)}, headers=_auth(env["token_a"]))
-    result = r.json()
+    result = r.json()["results"][0]
     assert result["skipped_identical"] is False
     assert result["changed"] + result["added"] >= 1
+
+
+def test_batch_upload_rejects_too_many_files(env):
+    """单批超过 MAX_UPLOAD_FILES（5）→ 整批 400，服务端复校（客户端限制不是安全边界）。"""
+    c = env["client"]
+    gid = c.post("/kb/groups", json={"name": "限"}, headers=_auth(env["token_a"])).json()["id"]
+    # 6 个文件（内容无关：批次校验先于任何落盘/解析）
+    parts = [("file", (f"f{i}.docx", b"x", "application/octet-stream")) for i in range(6)]
+    r = c.post(f"/kb/groups/{gid}/documents", files=parts, headers=_auth(env["token_a"]))
+    assert r.status_code == 400
+    assert "最多" in r.json()["error"]["message"]
+
+
+def test_batch_upload_rejects_oversized_total(env, monkeypatch):
+    """总大小超过上限 → 整批 400（用 max_total_mb=0 构造超限，避免真造 200MB 文件）。"""
+    c = env["client"]
+    monkeypatch.setattr(settings, "max_upload_total_mb", 0)
+    gid = c.post("/kb/groups", json={"name": "限"}, headers=_auth(env["token_a"])).json()["id"]
+    r = c.post(
+        f"/kb/groups/{gid}/documents",
+        files={"file": ("a.docx", _docx_bytes([DOC_TEXT]))},
+        headers=_auth(env["token_a"]),
+    )
+    assert r.status_code == 400
+    assert "总大小" in r.json()["error"]["message"]
+
+
+def test_batch_upload_continues_on_single_failure(env):
+    """混批：坏文件（不支持的类型）只标自身失败，好文件照常入库——单文件失败不连坐。"""
+    c = env["client"]
+    gid = c.post("/kb/groups", json={"name": "混批"}, headers=_auth(env["token_a"])).json()["id"]
+    parts = [
+        ("file", ("好.docx", _docx_bytes([DOC_TEXT]), "application/octet-stream")),
+        ("file", ("坏.txt", b"plain text", "text/plain")),
+    ]
+    r = c.post(f"/kb/groups/{gid}/documents", files=parts, headers=_auth(env["token_a"]))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["succeeded"] == 1 and body["failed"] == 1
+    by_name = {item["file_name"]: item for item in body["results"]}
+    assert by_name["好.docx"]["ok"] is True
+    assert by_name["坏.txt"]["ok"] is False
+    assert "不支持" in by_name["坏.txt"]["error"]
+    # 好文件确实进了文档列表
+    docs = c.get(f"/kb/groups/{gid}/documents", headers=_auth(env["token_a"])).json()
+    assert [d["file_name"] for d in docs] == ["好.docx"]
 
 
 # ===== 问答：命中 / 兜底 =====
@@ -235,7 +285,7 @@ def test_cross_user_access_is_404(env):
     gid = c.post("/kb/groups", json={"name": "A的组"}, headers=_auth(env["token_a"])).json()["id"]
     did = c.post(
         f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", _docx_bytes([DOC_TEXT]))}, headers=_auth(env["token_a"])
-    ).json()["doc_id"]
+    ).json()["results"][0]["doc_id"]
 
     r = c.get(f"/kb/groups/{gid}/documents", headers=_auth(env["token_b"]))
     assert r.status_code == 404

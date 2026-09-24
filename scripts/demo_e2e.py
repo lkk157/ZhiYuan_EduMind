@@ -131,8 +131,10 @@ def main() -> int:
             )
             upload_ok = resp.status_code == 200
             upload_body = resp.json() if upload_ok else {}
-            # 入库必须真的切出块来（chunk_count>=1）：只判 200 会漏掉「解析出空文本」的静默失败
-            upload_ok = upload_ok and upload_body.get("chunk_count", 0) >= 1
+            # 批量响应契约（2026-09-24 起）：{results:[...], succeeded, failed}
+            first = (upload_body.get("results") or [{}])[0]
+            # 入库必须成功且真有块（chunk_count>=1）：只判 200 会漏掉「解析出空文本」的静默失败
+            upload_ok = upload_ok and first.get("ok") is True and first.get("chunk_count", 0) >= 1
             if not report("upload docx and ingest chunks", upload_ok, resp.text):
                 return finish()
 

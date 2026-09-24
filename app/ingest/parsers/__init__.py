@@ -16,6 +16,10 @@ from pathlib import Path
 
 from app.core.exceptions import AppError
 
+# 入库格式白名单：接口层落盘前先查它（不支持的类型不落盘、不留文档行——
+# 这类文件重传永远不会成功，留痕只会污染列表），解析入口再查一遍是纵深防御第二层。
+SUPPORTED_SUFFIXES = {".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg"}
+
 
 @dataclass
 class ParsedPage:
@@ -43,6 +47,9 @@ def parse_document(path: Path) -> tuple[list[ParsedPage], list[int]]:
     """
     # 后缀大小写不敏感：Windows 用户常把 .PDF 扩展名改成大写
     suffix = path.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        # 其他后缀在入口用人话拒绝——与其在解析器深处报一个看不懂的错，不如这里挡住
+        raise AppError(message="不支持的文件类型（仅支持 PDF/Word/PPT/图片）", code=400)
     # 为什么延迟导入子解析器：子模块要 from app.ingest.parsers import ParsedPage，
     # 若在本模块顶层 import 子模块，「直接 import 子模块」的调用方式会触发
     # 半初始化包的循环导入；函数内导入把环彻底拆开。
@@ -62,7 +69,8 @@ def parse_document(path: Path) -> tuple[list[ParsedPage], list[int]]:
         from app.ingest.parsers.image_parser import parse_image
 
         return parse_image(path)
+    # 走到这里说明 SUPPORTED_SUFFIXES 与分发分支没对齐——属于代码缺陷，直接抛出暴露问题
     raise AppError(message="不支持的文件类型（仅支持 PDF/Word/PPT/图片）", code=400)
 
 
-__all__ = ["ParsedPage", "parse_document"]
+__all__ = ["ParsedPage", "parse_document", "SUPPORTED_SUFFIXES"]

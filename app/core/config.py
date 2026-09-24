@@ -51,11 +51,16 @@ class Settings(BaseSettings):
     ocr_keep_alive: str = "0"
     llm_num_ctx: int = 4096  # 上下文上限，防 8G 显存溢出
 
-    # ===== RAG 参数（阈值在 M3 用正负例标定后回填）=====
+    # ===== RAG 参数（阈值在 M2 验收用正负例标定后回填）=====
     chunk_size: int = 512
     chunk_overlap: int = 64
     top_k: int = 5
     score_threshold: float = 0.35
+
+    # ===== 上传限制（产品需求 2026-09-24：单批最多 5 个、总大小 ≤200MB）=====
+    # 放配置而非硬编码（CLAUDE.md §5）：答辩演示临时放宽只改 .env，不动代码
+    max_upload_files: int = 5
+    max_upload_total_mb: int = 200
 
     # ===== 路径（相对项目根目录）=====
     upload_dir: Path = Path("data/uploads")

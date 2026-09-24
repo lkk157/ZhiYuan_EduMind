@@ -101,12 +101,18 @@ class ApiClient:
     def list_documents(self, group_id: int) -> list:
         return self._request("GET", f"/kb/groups/{group_id}/documents")
 
-    def upload_document(self, group_id: int, file_name: str, data: bytes) -> dict:
-        """上传并同步入库。入库含解析+向量化，耗时可能到分钟级，超时单独放宽。"""
+    def upload_documents(self, group_id: int, files: list[tuple[str, bytes, str]]) -> dict:
+        """批量上传并入库。files=[(文件名, 字节, content_type), ...]，一次请求一批。
+
+        multipart 用「同名字段列表」形式：多个 ("file", ...) 对 → 后端 list[UploadFile]。
+        返回 {results:[逐文件结果], succeeded, failed}；入库含解析+向量化（可能带 OCR），
+        耗时可达分钟级，超时单独放宽到 300s。
+        """
+        parts = [("file", (name, data, ctype or "application/octet-stream")) for name, data, ctype in files]
         return self._request(
             "POST",
             f"/kb/groups/{group_id}/documents",
-            files={"file": (file_name, data)},
+            files=parts,
             timeout=_LONG_TIMEOUT,
         )
 

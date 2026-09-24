@@ -13,10 +13,11 @@
 3. 级联清理：删分组/删文档时 DB 行、块指纹、上传文件、Chroma 向量四方一起清，
    不留孤儿（孤儿向量会被检索引用出「已不存在的内容」）。
 """
+import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, UploadFile, status
+from fastapi import APIRouter, Depends, File, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_current_user
@@ -25,6 +26,7 @@ from app.core.exceptions import AppError, NotFoundError
 from app.db import crud
 from app.db.models import User, split_empty_pages
 from app.db.session import get_db
+from app.ingest.parsers import SUPPORTED_SUFFIXES
 from app.ingest.pipeline import ingest_file
 from app.rag import vector_store
 from app.rag.vector_store import ChromaStore, store_for
@@ -35,6 +37,8 @@ _store_for_original = store_for
 
 # 路由前缀 /kb：知识库全部接口挂在它下面（层间契约的路由路径，禁止改动）
 router = APIRouter(prefix="/kb", tags=["kb"])
+
+logger = logging.getLogger(__name__)
 
 
 def _open_store(user_id: int, group_id: int) -> ChromaStore:
@@ -158,52 +162,83 @@ def list_documents(
 
 
 @router.post("/groups/{gid}/documents")
-async def upload_document(
+async def upload_documents(
     gid: int,
-    file: UploadFile,
+    file: list[UploadFile] = File(...),
     user: User = Depends(get_current_user),
     db=Depends(get_db),
 ):
-    """上传并同步入库一个文件（同名重传 = chunk 级增量更新，由 ingest_file 状态机处理）。
+    """批量上传并逐个同步入库（产品需求：单批 ≤MAX_UPLOAD_FILES、总大小 ≤MAX_UPLOAD_TOTAL_MB）。
 
-    为什么同步 await 入库而不是先返回再后台跑：入库结果（added/changed/skipped_identical）
-    是用户上传后的即时反馈，前端要据此提示「已跳过/新增 N 块」；后台化属后续优化，
-    现阶段同步链路简单可测，也避免引入任务队列依赖（CLAUDE.md 禁 Docker/Redis）。
+    响应契约（2026-09-24 批量化改版；单文件调用返回同结构、results 只有一项）：
+    {"results":[{file_name, ok, error?, ...IngestResult 字段}], "succeeded": n, "failed": m}
+
+    为什么批次校验先于任何处理：超限整批拒绝并明确提示，好过处理一半再报错
+    （用户面对「传 5 个好了 3 个」的半截结果无从下手）；
+    为什么逐文件顺序处理、单文件失败不连坐：OCR/推理本就经 gateway 串行，
+    顺序处理显存与内存都友好（一次只读当前文件，200MB 上限也不会整批驻留内存）；
+    一个坏文件不该让同批其余文件白传。同名重传 = chunk 级增量（ingest_file 状态机，逐文件独立）。
     """
     _require_group(db, user_id=user.id, group_id=gid)
 
-    # ★ 路径穿越防线：只取文件名最后一段，上传名里的 ../../secret.txt 之类全部丢弃
-    file_name = Path(file.filename or "").name
-    if not file_name:
-        # 空文件名多半是异常客户端/脚本直打接口，统一业务错误出口（400）
-        raise AppError("文件名不能为空", code=400)
+    # --- 批次级校验（先于任何落盘/入库；客户端限制不是安全边界，服务端必须复校）---
+    if not file:
+        raise AppError("未收到任何文件", code=400)
+    if len(file) > settings.max_upload_files:
+        raise AppError(f"单批最多上传 {settings.max_upload_files} 个文件", code=400)
+    # UploadFile.size 由 Starlette 解析 multipart 时填充，无需整读文件即可校验总大小
+    total_bytes = sum(int(getattr(f, "size", 0) or 0) for f in file)
+    limit_bytes = settings.max_upload_total_mb * 1024 * 1024
+    if total_bytes > limit_bytes:
+        raise AppError(f"本批文件总大小超过 {settings.max_upload_total_mb}MB 上限", code=400)
 
-    # 落盘契约布局：upload_dir/u{user_id}/g{group_id}/文件名
     target_dir = _upload_dir_for(user.id, gid)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / file_name
-    # 二进制原样落盘（pdf/docx/pptx 都是二进制容器，绝不能走文本读写）
-    target_path.write_bytes(await file.read())
 
-    # 同步增量入库：skipped_identical / added / changed / removed 一律原样透传（契约字段）
-    result = await ingest_file(
-        db,
-        user_id=user.id,
-        group_id=gid,
-        file_name=file_name,
-        file_path=target_path,
-    )
-    return {
-        "doc_id": result.doc_id,
-        "skipped_identical": result.skipped_identical,
-        "added": result.added,
-        "changed": result.changed,
-        "removed": result.removed,
-        "unchanged": result.unchanged,
-        "page_count": result.page_count,
-        "chunk_count": result.chunk_count,
-        "empty_pages": result.empty_pages,
-    }
+    results: list[dict] = []
+    for f in file:
+        # ★ 路径穿越防线：只取文件名最后一段（逐文件独立处理）
+        file_name = Path(f.filename or "").name
+        try:
+            if not file_name:
+                raise AppError("文件名不能为空", code=400)
+            # 格式白名单前置到落盘之前：不支持的类型不落盘、不留文档行
+            # （这类文件重传永远不会成功，走 ingest 的失败留痕只会污染文档列表）
+            if Path(file_name).suffix.lower() not in SUPPORTED_SUFFIXES:
+                raise AppError("不支持的文件类型（仅支持 PDF/Word/PPT/图片）", code=400)
+            target_path = target_dir / file_name
+            # 二进制原样落盘（每次只读当前文件，处理完即释放）
+            target_path.write_bytes(await f.read())
+            result = await ingest_file(
+                db, user_id=user.id, group_id=gid, file_name=file_name, file_path=target_path
+            )
+            results.append(
+                {
+                    "file_name": file_name,
+                    "ok": True,
+                    "error": None,
+                    "doc_id": result.doc_id,
+                    "skipped_identical": result.skipped_identical,
+                    "added": result.added,
+                    "changed": result.changed,
+                    "removed": result.removed,
+                    "unchanged": result.unchanged,
+                    "page_count": result.page_count,
+                    "chunk_count": result.chunk_count,
+                    "empty_pages": result.empty_pages,
+                }
+            )
+        except AppError as e:
+            # 业务层可预期错误（不支持的类型/名称非法/Ollama 连不上等）：人话直出，继续下一份
+            results.append({"file_name": file_name, "ok": False, "error": e.message})
+        except Exception:
+            # 非预期异常（解析器崩溃等）：pipeline 已把文档标 failed 留痕，
+            # 这里翻译成人话并继续处理同批其余文件，完整栈进日志排查
+            logger.exception("批量上传中单文件入库失败: %s", file_name)
+            results.append({"file_name": file_name, "ok": False, "error": "入库失败，请重试"})
+
+    succeeded = sum(1 for r in results if r["ok"])
+    return {"results": results, "succeeded": succeeded, "failed": len(results) - succeeded}
 
 
 @router.delete("/documents/{did}")
