@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     top_k: int = 5
     score_threshold: float = 0.35
 
+    # ===== Agent 多轮参数（M4）=====
+    # 滑窗条数：最近 N 条消息参与 query 改写（6 条 ≈ 3 轮问答）。
+    # 为什么进配置不硬编码：窗口大小是要标定的调参项（太小指代丢、太大费 token），
+    # 与 top_k 同性质，答辩现场调 .env 即可不动代码
+    short_term_window: int = 6
+
     # ===== 上传限制（产品需求 2026-09-24：单批最多 5 个、总大小 ≤200MB）=====
     # 放配置而非硬编码（CLAUDE.md §5）：答辩演示临时放宽只改 .env，不动代码
     max_upload_files: int = 5

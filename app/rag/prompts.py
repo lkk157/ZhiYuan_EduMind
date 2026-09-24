@@ -73,13 +73,19 @@ def is_insufficient_answer(answer: str) -> bool:
 _SOURCE_PATTERN = re.compile(r"【来源[^】]*】")
 
 
-def build_qa_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tuple[str, str]:
+def build_qa_prompt(
+    question: str, chunks: Sequence["RetrievedChunk"], *, guide: bool = False
+) -> tuple[str, str]:
     """把问题与召回资料编排成 (system, prompt) 两段提示词。
 
     资料按 `[n] (文件:xxx, 第X页)` 带编号编排：
     - 编号让模型可以「据资料[2]…」地引用，回答有依据感；
     - 文件名+页码随资料一起给模型，它才可能说出「第X页讲了…」这类可核对的话，
       但来源标注本身不许它写（由系统统一追加）。
+
+    guide=True（M4 引导式答疑/苏格拉底模式）：先反问引导再给提示，不直接端出完整答案——
+    教育学「脚手架」理念的落点，产品开关默认关闭（不影响既有答疑行为）。
+    引导模式仍受「资料不足固定句式」铁律约束（is_insufficient_answer 判定不受影响）。
 
     注意：chunks 为空时调用方不应调 LLM（应直接回 FALLBACK_MESSAGE），
     本函数不负责兜底话术——文本层不掺业务分支。
@@ -96,6 +102,13 @@ def build_qa_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tuple[
         "自己写的来源一律会被删除；\n"
         "4. 使用与提问相同的语言回答（默认中文），面向学生，条理清晰。"
     )
+    if guide:
+        # 追加而非替换：铁律 1-4 原样保留，引导式只是「怎么答」的风格开关
+        system += (
+            "\n5.【引导式答疑模式】不要直接给出完整最终答案：先用一个切中要害的"
+            "引导性反问或分步提示启发学生自己思考，最后用一句话点到关键结论即可；"
+            "若学生的问题本身已包含完整推理，指出其正确/错误的那一步即可。"
+        )
 
     # 资料块：[n] (文件:xxx, 第X页) + 正文，编号从 1 起
     blocks: list[str] = []
@@ -109,6 +122,102 @@ def build_qa_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tuple[
         f"问题：{question}\n"
         "回答："
     )
+    return system, prompt
+
+
+def build_summary_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tuple[str, str]:
+    """总结任务提示词：只依据资料做结构化小结（M4 总结工具用）。
+
+    为什么单独一套而不是复用问答模板：总结的输出形态是「要点列表」，
+    与问答的「针对问题作答」不同——给模型明确的结构指令，输出才稳定可展示；
+    铁律（不足固定句式/禁自写来源）与问答完全一致，判定与净化逻辑可整套复用。
+    """
+    system = (
+        "你是「知源」教育知识库的学习总结助手。回答必须遵守：\n"
+        "1. 只依据用户消息中给出的参考资料做总结，禁止补充资料之外的内容；\n"
+        "2. 资料不足以完成总结时，回答必须以「根据现有资料无法回答」开头，禁止编造；\n"
+        "3. 禁止自己书写任何来源标注——系统会统一追加；\n"
+        "4. 用与提问相同的语言（默认中文），以「要点列表」形式输出，"
+        "每条要点一行、不超过 40 字，面向学生复习场景。"
+    )
+    blocks: list[str] = []
+    for n, chunk in enumerate(chunks, start=1):
+        blocks.append(f"[{n}] (文件:{chunk.file_name}, 第{chunk.page_no}页)\n{chunk.text}")
+    materials = "\n\n".join(blocks)
+    prompt = (
+        "请只依据以下参考资料完成总结。\n\n"
+        f"{materials}\n\n"
+        f"总结要求：{question}\n"
+        "输出："
+    )
+    return system, prompt
+
+
+# 出题任务的试题 JSON 契约（前后端共同遵守，改字段必须三端同步）：
+# {"type":"quiz","questions":[
+#   {"type":"choice","question":"...","options":["A. ..","B. ..","C. ..","D. .."],
+#    "answer":"A","explanation":"..."},
+#   {"type":"short","question":"...","answer":"标准答案","explanation":"..."}]}
+_QUIZ_SCHEMA = (
+    '{"type":"quiz","questions":['
+    '{"type":"choice","question":"题干","options":["选项A","选项B","选项C","选项D"],'
+    '"answer":"A","explanation":"解析"},'
+    '{"type":"short","question":"题干","answer":"标准答案","explanation":"解析"}]}'
+)
+
+
+def build_quiz_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tuple[str, str]:
+    """出题任务提示词：依据资料生成结构化试题 JSON（M4 出题/随堂测工具用）。
+
+    为什么强制 JSON 输出而不是自然语言：试题要渲染成交互卡片、要判分，
+    结构化才能被代码可靠解析（parse 失败有兜底，但要尽量一次成）；
+    道数不写死在模板里——用户说「出3道」「来5道随堂测」由模型从 question 里读，
+    一个模板覆盖两种场景（含随堂测），不用为道数再造参数。
+    """
+    system = (
+        "你是「知源」教育知识库的出题人。生成规则：\n"
+        "1. 只依据给出的参考资料出题，题目必须能在资料中找到答案，禁止编造知识点；\n"
+        "2. 按用户要求的道数出题；未指定时出 3 道，题型以单选（choice）为主，"
+        "可含简答（short）；\n"
+        "3. 只输出一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码块标记；\n"
+        f"4. JSON 结构必须是：{_QUIZ_SCHEMA}\n"
+        "其中 choice 的 answer 是正确选项字母（A/B/C/D），short 的 answer 是标准答案文本。"
+    )
+    blocks: list[str] = []
+    for n, chunk in enumerate(chunks, start=1):
+        blocks.append(f"[{n}] (文件:{chunk.file_name}, 第{chunk.page_no}页)\n{chunk.text}")
+    materials = "\n\n".join(blocks)
+    prompt = (
+        "请只依据以下参考资料出题。\n\n"
+        f"{materials}\n\n"
+        f"出题要求：{question}\n"
+        "JSON："
+    )
+    return system, prompt
+
+
+def build_score_prompt(questions: list[dict], answers: list[str]) -> tuple[str, str]:
+    """判分提示词：学生作答 vs 标准答案 → {"score":0-100,"comment":"..."}。
+
+    为什么判分也让 LLM 做而不是字符串比对：简答题的「意思对了但措辞不同」
+    是常态（教育场景的正确答案本就开放），机械比对会把对的判成错的；
+    单选题 answer 精确匹配在代码层先做（见 score 端点），LLM 只判简答——
+    能确定的绝不确定性，是判分设计的第一原则。
+    """
+    system = (
+        "你是阅卷老师。对照标准答案给学生的作答打分，只输出一个 JSON 对象："
+        '{"score":0到100的整数,"comment":"不超过50字的中文评语"}，'
+        "不要输出任何其他内容。单选题答对得满分、答错 0 分；简答题按要点给分。"
+    )
+    lines = []
+    # 标准答案从题目 dict 里取（q["answer"]），序列只配对「题面 ↔ 学生作答」两个维度
+    for i, (q, stu) in enumerate(zip(questions, answers), start=1):
+        lines.append(
+            f"第{i}题：{q.get('question', '')}\n"
+            f"  标准答案：{q.get('answer', '')}\n"
+            f"  学生作答：{stu or '（未作答）'}"
+        )
+    prompt = "\n".join(lines)
     return system, prompt
 
 

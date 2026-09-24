@@ -1,48 +1,35 @@
 # -*- coding: utf-8 -*-
 """
-问答接口：/chat/ask（M2 读路径的 HTTP 出口）。
+问答接口：/chat/ask（M4 起为 Agent 状态图的 HTTP 出口）+ /chat/conversations* + /chat/score。
 
-为什么「命中为空就绝不调 LLM」写在接口层（本文件的命门）：
-召回为空时任何生成都是无中生有——通用 RAG 产品在这里会让模型「礼貌性地编一段」，
-本项目的核心卖点恰恰是反着来：宁可回 FALLBACK_MESSAGE 兜底话术，也绝不把
-无关/缺失的资料喂给 LLM 去编。防幻觉不是提示词里的恳求，而是代码路径上的硬闸门：
-空命中分支根本不会走到 gateway.generate。答辩演示就讲这条分支。
+分层（M4 重构后）：本文件只做「鉴权/会话/分组校验 → 调 run_agent → 落库 → 拼响应」——
+意图分类、query 改写、检索、四个工具全部收在 app/agent/（状态图），
+防幻觉硬闸门/三层防线的现行宿主是 agent/graph.py 与 agent/tools.py，
+本文件不再直接碰 gateway/retrieve（测试补丁缝随之下迁，见 tests 的 patch 命名空间）。
 
-其余出口纪律：
-- 模型自写的【来源…】一律 sanitize_answer 删掉（那是幻觉重灾区）；
-- 真来源由 append_sources 按真实命中统一追加，sources 列表与它同序同去重，
-  保证前端展示的出处与答案末尾的【来源】永远一致。
+会话历史（2026-09-24）：/chat/conversations* 四个端点 + ask 可选 conversation_id 落库；
+落库内容 = run_agent 的四字段结果（answer/sources/hit/intent 中 intent 不落库——
+message 表无该列，加列需迁移，回看时按内容特征识别，见 M4 过程报告）。
 
-会话历史（2026-09-24）：/chat/conversations* 四个端点 + ask 可选 conversation_id 落库。
-落库只是「记录」不改变生成路径——检索仍旧只看当前 question（多轮上下文/query 改写属 M4），
-本文件新增的全部是 DB 读写，零新增模型调用（显存红线自查通过）。
+显存红线自查：本文件零直接模型调用；run_agent 内部（改写/分类/生成）全部
+经 gateway 的 Semaphore(1)+Lock 串行排队，单轮最多 3 次顺序调用，无并发推理。
 """
 import json
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from app.agent.graph import run_agent
+from app.agent.tools import score_quiz
 from app.api.auth import get_current_user
-from app.core.config import settings
-from app.core.exceptions import NotFoundError
-from app.core.llm import gateway
+from app.core.exceptions import AppError, NotFoundError, UpstreamError
+from app.memory.short_term import load_window
 from app.db import crud
 from app.db.models import User
 from app.db.session import get_db
-from app.rag.prompts import (
-    FALLBACK_MESSAGE,
-    append_sources,
-    build_qa_prompt,
-    is_insufficient_answer,
-    sanitize_answer,
-)
-from app.rag.retriever import retrieve
 
 # 路由前缀 /chat：问答接口挂在它下面（层间契约的路由路径，禁止改动）
 router = APIRouter(prefix="/chat", tags=["chat"])
-
-# 溯源摘要长度：snippet=块文本前约 80 字（契约口径），够用户核对出处又不撑爆响应体
-SNIPPET_LEN = 80
 
 
 class AskRequest(BaseModel):
@@ -61,6 +48,8 @@ class AskRequest(BaseModel):
     question: str
     group_ids: list[int] | None = None
     conversation_id: int | None = None
+    # M4 引导式答疑（苏格拉底模式）：True 时 qa 工具改用引导式 system（默认关闭）
+    guide_mode: bool = False
 
 
 class ConversationCreateRequest(BaseModel):
@@ -102,31 +91,6 @@ def _load_sources(raw: str | None) -> list[dict]:
     except (json.JSONDecodeError, TypeError):
         return []
     return parsed if isinstance(parsed, list) else []
-
-
-def _persist_and_return_fallback(db, conversation, body) -> dict:
-    """两条兜底路径共用的出口：可选落库 + 统一返回（固定话术/hit=false/空来源）。
-
-    为什么抽成一个函数：「空检索」与「模型判定资料不足」两条路径的响应与落库口径
-    必须**逐字节一致**——分开写迟早漂移（比如一条落库一条忘了），单测也就没法用
-    同一组断言锁两种触发方式。契约：hit=false ⇒ answer 恒为 FALLBACK_MESSAGE、
-    sources 恒为空，前端与历史回看的兜底样式因此只有一套。
-    """
-    if conversation is not None:
-        crud.append_message_pair(
-            db,
-            conversation=conversation,
-            question=body.question,
-            answer=FALLBACK_MESSAGE,
-            hit=False,
-            sources_json="[]",
-        )
-    return {
-        "answer": FALLBACK_MESSAGE,
-        "sources": [],
-        "hit": False,
-        "conversation_id": body.conversation_id,
-    }
 
 
 # ===== 会话历史 CRUD（挂 /chat 前缀：与问答同域，不另开路由树）=====
@@ -196,14 +160,12 @@ async def ask(
     user: User = Depends(get_current_user),
     db=Depends(get_db),
 ):
-    """知识库问答：检索 → （命中）生成带溯源的答案 / （未命中）兜底且不调 LLM。
+    """知识库问答（M4 起经 Agent 状态图）：校验 → run_agent → 可选落库 → 返回。
 
-    返回 {answer, sources:[{file_name,page_no,snippet}], hit, conversation_id}。
-    hit=false 有且只有两条路径，口径完全一致（_persist_and_return_fallback 统一出口）：
-    ① 空检索——根本不调 LLM（防幻觉硬闸门，第一道）；
-    ② 检索到但模型判定「根据现有资料无法回答」——不拼来源、回固定话术
-      （资料不足闸门，第二道，2026-09-24 产品需求：不知道就不输出来源）。
-    两条路径 answer 恒为 FALLBACK_MESSAGE、sources 恒为空；conversation_id 原样回显。
+    返回 {answer, sources, hit, intent, conversation_id}（intent ∈ qa/quiz/summary/calc）。
+    hit=false 的口径不变：answer 恒为 FALLBACK_MESSAGE、sources 恒为空——
+    三条触发路径（空检索零调用 / 资料不足闸门 / 出题 JSON 解析失败）统一在
+    agent 层的 _fallback 收口，本接口只负责原样透传 + 落库。
     """
     # 0) 会话归属先校验（fail fast）：拿别人的 conversation_id 提前 404，
     #    别等检索/生成烧完一轮显存才发现没权限——浪费推理还把越权拖到耗时操作之后
@@ -226,68 +188,55 @@ async def ask(
             if gid not in group_ids:  # 去重：重复的 gid 会把同批命中翻倍进入排序
                 group_ids.append(gid)
 
-    # 2) 检索：阈值过滤 + top_k 截断在 retriever 内完成（宁缺毋滥是防幻觉第一道闸）
-    chunks = await retrieve(body.question, user_id=user.id, group_ids=group_ids)
+    # 2) 滑窗读历史（仅会话问答有历史；无历史时后续改写零模型调用）
+    history = load_window(db, user_id=user.id, conversation_id=body.conversation_id)
 
-    # 3) ★ 防幻觉硬闸门（第一道）：未命中立即兜底返回，严禁调用 gateway.generate——
-    #    没有资料还让 7B 作答 = 百分之百编造；兜底话术引导用户换问法或先传资料。
-    #    （本分支是否真的不碰 LLM 是单测的重点断言，改动前先想清楚卖点还在不在）
-    #    兜底问答同样落库：用户回看时必须看到「这轮没命中」，历史不许选择性失忆。
-    if not chunks:
-        return _persist_and_return_fallback(db, conversation, body)
-
-    # 4) 命中：编排提示词 → 生成 → 净化伪来源 → ★资料不足闸门（第二道）→ 拼真来源
-    system, prompt = build_qa_prompt(body.question, chunks)
-    raw = await gateway.generate(
-        model=settings.llm_model,  # 模型名只从配置读，禁止硬编码（CLAUDE.md §5）
-        prompt=prompt,
-        system=system,
-        num_predict=512,  # 输出长度受控（显存红线），答案不做长文生成
-        temperature=0.3,  # 低温度：问答要忠于资料，减少发挥
+    # 3) Agent 状态图：计算旁路/改写 → 检索 → 分类 → 四工具（布局见 agent/graph.py）
+    result = await run_agent(
+        question=body.question,
+        user_id=user.id,
+        group_ids=group_ids,
+        history=history,
+        guide_mode=body.guide_mode,
     )
-    answer = sanitize_answer(raw)
 
-    # ★ 资料不足闸门（2026-09-24 产品需求）：检索擦边命中了一些块，但模型判定
-    # 资料其实答不上——此时拼【来源】等于「嘴上说不知道、脚下引出处」，自相矛盾。
-    # 整体走兜底口径（Option A）：固定话术 + hit=false + 空来源，契约与前端零改动；
-    # 判定在拼来源之前，来源根本不会被生成——闸门位置是本分支存在的全部意义。
-    if is_insufficient_answer(answer):
-        return _persist_and_return_fallback(db, conversation, body)
-
-    # 5) 正常命中：强制追加真来源
-    answer = append_sources(answer, chunks)
-
-    # 6) sources 与 append_sources 同序同去重（(file_name, page_no) 去重保序），
-    #    保证前端出处列表 == 答案末尾【来源】；snippet 取该块前约 80 字供用户核对
-    sources: list[dict] = []
-    seen: set[tuple[str, int]] = set()
-    for chunk in chunks:
-        key = (chunk.file_name, chunk.page_no)
-        if key in seen:
-            continue
-        seen.add(key)
-        sources.append(
-            {
-                "file_name": chunk.file_name,
-                "page_no": chunk.page_no,
-                "snippet": chunk.text[:SNIPPET_LEN],
-            }
-        )
-
-    # 7) 会话落库（可选）：sources 用 ensure_ascii=False 存原文——
-    #    中文不转 \uXXXX，运维直接 SELECT * 也能读懂，回看还原零损耗
+    # 4) 会话落库（可选）：hit=false 的兜底轮同样落库（历史不许选择性失忆）；
+    #    sources 用 ensure_ascii=False 存原文——运维 SELECT * 直接可读
     if conversation is not None:
         crud.append_message_pair(
             db,
             conversation=conversation,
             question=body.question,
-            answer=answer,
-            hit=True,
-            sources_json=json.dumps(sources, ensure_ascii=False),
+            answer=result["answer"],
+            hit=result["hit"],
+            sources_json=json.dumps(result["sources"], ensure_ascii=False),
         )
-    return {
-        "answer": answer,
-        "sources": sources,
-        "hit": True,
-        "conversation_id": body.conversation_id,
-    }
+    return {**result, "conversation_id": body.conversation_id}
+
+
+class ScoreRequest(BaseModel):
+    """判分入参：quiz=出题工具返回的试题 JSON 对象，answers=按题序的学生作答文本。"""
+
+    quiz: dict
+    answers: list[str]
+
+
+@router.post("/score")
+async def score(
+    body: ScoreRequest,
+    user: User = Depends(get_current_user),
+):
+    """试题判分：单选代码层精确判、简答 LLM 按要点判（见 tools.score_quiz）。
+
+    判分不落库：M4 阶段它是「会话内即时反馈」，错题正式归档属 M5 quiz_records 表。
+    单选全卷零 LLM 调用（能确定的绝不交给模型）；简答解析失败报 502 人话可重试，
+    宁可报错也不返回假分数。
+    """
+    questions = body.quiz.get("questions") if isinstance(body.quiz, dict) else None
+    if not isinstance(questions, list) or not questions:
+        raise AppError("试题格式不正确", code=400)
+    try:
+        return await score_quiz(questions, body.answers)
+    except RuntimeError as e:
+        # LLM 判分输出解析失败：翻译成统一出口的人话 502（前端 ApiError 直接透出）
+        raise UpstreamError("判分失败，请重试") from e

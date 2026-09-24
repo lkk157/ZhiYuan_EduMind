@@ -64,6 +64,14 @@ class _StubGateway:
         return self.reply
 
 
+def _stub_agent(monkeypatch, reply: str, intent_label: str = "qa") -> _StubGateway:
+    """M4 缝位：生成在 tools、分类在 intent，分别打桩（理由同 test_kb_chat 同名函数）。"""
+    answer_stub = _StubGateway(reply)
+    monkeypatch.setattr("app.agent.tools.gateway", answer_stub)
+    monkeypatch.setattr("app.agent.intent.gateway", _StubGateway(intent_label))
+    return answer_stub
+
+
 @pytest.fixture()
 def env(db_session, monkeypatch, chroma_client, fake_embed_fn):
     """注入 SQLite 会话 + 内存向量库/假向量，造好 A、B 两个用户。"""
@@ -118,7 +126,7 @@ def test_ask_persists_pair_and_reads_back(env, monkeypatch):
     cid = conv.json()["id"]
 
     gid = _make_group_with_doc(c, env["token_a"])
-    monkeypatch.setattr("app.api.chat.gateway", _StubGateway("学习率过大会震荡。"))
+    _stub_agent(monkeypatch, "学习率过大会震荡。")
 
     r = c.post(
         "/chat/ask",
@@ -144,7 +152,7 @@ def test_ask_without_conversation_id_does_not_persist(env, monkeypatch):
     """★ 兼容性硬断言：不传 conversation_id → 会话列表保持为空（旧调用零副作用）。"""
     c = env["client"]
     gid = _make_group_with_doc(c, env["token_a"])
-    monkeypatch.setattr("app.api.chat.gateway", _StubGateway("答。"))
+    _stub_agent(monkeypatch, "答。")
 
     r = c.post(
         "/chat/ask",
@@ -164,7 +172,7 @@ def test_fallback_answer_also_persisted(env, monkeypatch):
     async def fake_retrieve(question, **kwargs):
         return []
 
-    monkeypatch.setattr("app.api.chat.retrieve", fake_retrieve)
+    monkeypatch.setattr("app.agent.graph.retrieve", fake_retrieve)
 
     r = c.post(
         "/chat/ask",
@@ -199,7 +207,7 @@ def test_conversation_list_count_and_recent_first(env, monkeypatch):
 
     # 给「早的」来一轮问答 → updated_at 刷新 → 它应顶到最前且消息数=2
     gid = _make_group_with_doc(c, env["token_a"])
-    monkeypatch.setattr("app.api.chat.gateway", _StubGateway("答。"))
+    _stub_agent(monkeypatch, "答。")
     c.post(
         "/chat/ask",
         json={"question": "学习率", "group_ids": [gid], "conversation_id": cid_old},

@@ -126,11 +126,14 @@ class ApiClient:
         question: str,
         group_ids: list[int] | None = None,
         conversation_id: int | None = None,
+        guide_mode: bool = False,
     ) -> dict:
-        """提问。group_ids=None=检索本人全部分组；返回 {answer, sources, hit, conversation_id}。
+        """提问。group_ids=None=检索本人全部分组；
+        返回 {answer, sources, hit, intent, conversation_id}（intent=M4 意图路由标签）。
 
         conversation_id=None 时后端不落库（无状态，兼容旧行为）；
-        传了则一问一答写入该会话（回看历史靠它）。
+        传了则一问一答写入该会话（回看历史靠它）；
+        guide_mode=True 走引导式答疑（苏格拉底模式，M4）。
         """
         return self._request(
             "POST",
@@ -139,9 +142,15 @@ class ApiClient:
                 "question": question,
                 "group_ids": group_ids,
                 "conversation_id": conversation_id,
+                "guide_mode": guide_mode,
             },
             timeout=_LONG_TIMEOUT,  # 7B 生成可能到分钟级（含模型冷加载）
         )
+
+    def score_quiz(self, quiz: dict, answers: list[str]) -> dict:
+        """试题判分：quiz=出题返回的试题 JSON 对象，answers=按题序作答；
+        返回 {score, comment}。单选全卷后端零 LLM 直接算，简答走模型按要点给分。"""
+        return self._request("POST", "/chat/score", json={"quiz": quiz, "answers": answers})
 
     # ---------- 会话历史 ----------
 

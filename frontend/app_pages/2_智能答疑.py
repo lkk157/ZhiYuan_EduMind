@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-智能答疑页：选分组提问 → 带溯源作答（会话历史持久化，可切换回看）。
+智能答疑页：选分组提问 → 带溯源作答（会话历史持久化 + M4 Agent 意图路由）。
 
 会话历史设计（2026-09-24 起）：
 - MySQL 是事实源：每个会话的问答经 /chat/ask?conversation_id= 落库，
@@ -10,13 +10,24 @@
 - 「＋ 新对话」选择哨兵：首问时才真正建会话行（标题=首问截 30 字，零 LLM 调用），
   避免点一下「新建」就留一个永远空着的会话壳。
 
+M4 增强：
+- 意图徽章（答疑/出题/总结/计算）让 Agent 路由「看得见」——答辩演示指这里；
+  回看历史时 intent 不落库（message 表无该列，加列需迁移），按内容特征识别试题，
+  其余意图回看不显示徽章（活体显示、回看降级，见 components/quiz.try_parse_quiz 注释）；
+- 引导式答疑开关（苏格拉底模式）：只影响下一次提问的 system prompt；
+- 试题 JSON 的消息渲染成可作答卡片，回看时同一张卡可再次作答判分。
+
 为什么未命中样式是 info 不是 error：兜底不是出错，而是「宁可不说也不编」的产品承诺
 （后端空检索分支根本不会调用 LLM）——UI 口径与后端卖点保持一致。
 """
 import streamlit as st
 
+from components.quiz import render_quiz_card, try_parse_quiz
 from components.sources import render_hit_badge, render_sources
 from services.api import ApiClient, ApiError
+
+# 意图标签中文映射（与后端 intent.VALID_INTENTS 对齐，只做展示）
+_INTENT_LABELS = {"qa": "答疑", "quiz": "出题", "summary": "总结", "calc": "计算"}
 
 # 鉴权守卫（纵深防御第二层，理由同上传管理页）
 if not st.session_state.get("token"):
@@ -124,15 +135,38 @@ selected_groups = st.multiselect(
 if not selected_groups:
     st.caption("请至少选择一个分组作为检索范围。")
 
+# 引导式答疑（M4 苏格拉底模式）：默认关——不影响既有直答行为，演示时现场打开
+st.toggle(
+    "引导式答疑（苏格拉底模式）",
+    key="guide_mode",
+    help="打开后不直接给完整答案，先反问引导你思考、再点到关键结论。",
+)
+
 # ---------- 对话区 ----------
 st.subheader("对话")
 history = st.session_state.chat_history
-for msg in history:
+for idx, msg in enumerate(history):
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
         if msg["role"] == "assistant":
-            render_hit_badge(msg.get("hit", True))
+            # 试题消息 → 渲染成交互卡片（活体与回看同一渲染路径，key 按序号隔离）
+            quiz = try_parse_quiz(msg.get("content", ""))
+            if quiz:
+                render_quiz_card(quiz, key_prefix=f"quiz_{idx}", client=client)
+                render_sources(msg.get("sources") or [])
+                continue
+            st.markdown(msg["content"])
+            intent = msg.get("intent")  # 活体回答才有（回看从服务端拉，无 intent 列）
+            if intent == "calc":
+                # 计算工具的「命中」语义与知识库不同（无来源），不显示命中徽章，
+                # 改显意图标签，避免「已命中知识库」配上空来源的自相矛盾
+                st.caption(f":material/route: 意图：{_INTENT_LABELS.get(intent, intent)}")
+            else:
+                if intent:
+                    st.caption(f":material/route: 意图：{_INTENT_LABELS.get(intent, intent)}")
+                render_hit_badge(msg.get("hit", True))
             render_sources(msg.get("sources") or [])
+        else:
+            st.markdown(msg["content"])
 
 if history:
     # 「清空」升级为「删除当前会话」：历史已落库，只清本地缓存的话刷新一下就回来了——
@@ -153,7 +187,10 @@ if history:
 
 # submit_mode="disable"：回答生成期间禁用输入框——防止连发把 7B 推理队列打成长龙
 # （后端虽有互斥闸门兜底，前端体验上也不该让用户误以为「卡了」）
-prompt = st.chat_input("就课件内容提问（支持术语/对比问法）", submit_mode="disable")
+prompt = st.chat_input(
+    "提问 / 出题（如：出3道题）/ 总结上一节 / 纯算式计算",
+    submit_mode="disable",
+)
 if prompt:
     if not selected_groups:
         st.warning("请先选择检索分组再提问。")
@@ -185,20 +222,24 @@ if prompt:
                 prompt,
                 group_ids=[name_to_id[n] for n in selected_groups],
                 conversation_id=conv_id,
+                guide_mode=bool(st.session_state.get("guide_mode")),
             )
-            st.markdown(result["answer"])
-            render_hit_badge(result["hit"])
-            render_sources(result.get("sources") or [])
+            # 落历史缓存（intent 只活在本会话内存里，回看时服务端没有该字段——见模块注释）
             history.append(
                 {
                     "role": "assistant",
                     "content": result["answer"],
                     "sources": result.get("sources") or [],
                     "hit": result["hit"],
+                    "intent": result.get("intent"),
                 }
             )
+            # 重跑后由上方统一渲染循环上屏（成功/失败两条路径同构，避免两处逻辑漂移）
+            st.rerun()
         except ApiError as e:
             # 失败也进本地历史：会话脉络不断线，用户知道哪一轮出了问题。
             # 失败轮服务端没有落库（后端出错即未走到 append）——刷新后这轮消失属预期，重问即可。
-            st.error(e.message)
-            history.append({"role": "assistant", "content": f"请求失败：{e.message}", "sources": [], "hit": False})
+            history.append(
+                {"role": "assistant", "content": f"请求失败：{e.message}", "sources": [], "hit": False}
+            )
+            st.rerun()
