@@ -270,7 +270,9 @@ def page_image(
         raise NotFoundError("文档不存在")
     path = Path(doc.file_path)
     if not path.is_file():
-        raise NotFoundError("文件已不存在")
+        # 人话要给出路：向量还在（检索/问答不受影响），只是源文件不在了——
+        # 重新上传同名文件即可秒恢复（落盘先行 + 文件指纹短路，零重算）
+        raise NotFoundError("源文件已不在服务器上（检索不受影响），重新上传该文件即可恢复原页预览")
 
     suffix = path.suffix.lower()
     if suffix in _IMAGE_MEDIA:
