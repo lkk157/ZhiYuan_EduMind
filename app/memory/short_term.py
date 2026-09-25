@@ -29,15 +29,43 @@ _HISTORY_ITEM_CHARS = 300
 
 
 def load_window(db, *, user_id: int, conversation_id: int | None) -> list[dict]:
-    """读会话最近 N 条消息，返回 [{"role","content"}, ...]（时间正序）。
+    """读会话最近 N 条**有效**消息，返回 [{"role","content"}, ...]（时间正序）。
 
-    conversation_id 为 None（未传，无状态问答）或会话为空 → 返回 []，
+    为什么先剔除兜底轮再截窗（2026-09-25 实测缺陷，M4 滑窗遗留、M6 demo 抓获）：
+    hit=False 的一轮 = 固定拒答话术 + 一个超纲问题（如「番茄炒蛋要放多少盐」）——
+    对改写零语义信息，却会把 query 改写带偏到无关话题，检索随之空召回，
+    且污染随历史持续多轮（序列 正例→负例→出题 中出题连续翻车，实测复现两组对照）。
+    因此只让「有实质内容的对话」参与改写；问答必须**成对**剔除——
+    只删回答留提问没有用，问题文本照样带偏。
+
+    先过滤后截窗：N 的语义从「最近 N 条消息」变为「最近 N 条有效消息」，
+    中间夹几轮兜底也不会把更早的实质对话挤出窗口（指代消解仍找得到所指）。
+
+    conversation_id=None（无状态问答）或剔除后为空 → 返回 []，
     调用方以「空历史」语义处理（不触发改写，省一次模型调用）。
     """
     if conversation_id is None:
         return []
     messages = crud.list_messages(db, user_id=user_id, conversation_id=conversation_id)
-    window = messages[-settings.short_term_window :] if settings.short_term_window > 0 else []
+
+    # 成对剔除兜底轮：user 暂存等配对；assistant hit=False 时连同其提问一并作废
+    kept = []
+    pending_user = None
+    for m in messages:
+        if m.role == "user":
+            pending_user = m
+            continue
+        if m.hit is False:  # 兜底回答：该轮整对作废（提问连坐，理由见 docstring）
+            pending_user = None
+            continue
+        if pending_user is not None:
+            kept.append(pending_user)
+            pending_user = None
+        kept.append(m)
+    if pending_user is not None:
+        kept.append(pending_user)  # 防御：孤儿提问（成对原子落库下不应出现）
+
+    window = kept[-settings.short_term_window :] if settings.short_term_window > 0 else []
     return [
         {"role": m.role, "content": (m.content or "")[:_HISTORY_ITEM_CHARS]}
         for m in window

@@ -60,6 +60,47 @@ def test_load_window_none_conversation_is_empty(db_session):
     assert short_term.load_window(db_session, user_id=1, conversation_id=None) == []
 
 
+def test_load_window_drops_fallback_rounds_before_slice(db_session, monkeypatch):
+    """★兜底轮成对剔除且先过滤后截窗（M6 demo 抓获的改写污染缺陷）。
+
+    三轮里第 2 轮 hit=False：其「番茄炒蛋」提问必须连坐作废（只删回答没用，
+    问题文本照样带偏改写）；窗口只装 2 条 → 取到的是过滤后的最近两条
+    （问2/答2 = 第 3 轮有效对话），证明过滤发生在截窗之前。
+    """
+    user = crud.create_user(db_session, username="u_fallback", password_hash="x")
+    conv = crud.create_conversation(db_session, user_id=user.id, title="t")
+    for q, a, hit in [
+        ("学习率过大会怎样", "会震荡不收敛。", True),
+        ("番茄炒蛋放多少盐", "知识库中未找到相关内容。", False),
+        ("出一道单选题", "好的题目如下。", True),
+    ]:
+        crud.append_message_pair(
+            db_session, conversation=conv, question=q, answer=a, hit=hit, sources_json="[]"
+        )
+    monkeypatch.setattr(settings, "short_term_window", 2)
+
+    window = short_term.load_window(db_session, user_id=user.id, conversation_id=conv.id)
+    assert [m["content"] for m in window] == ["出一道单选题", "好的题目如下。"]
+    # 窗口开大点：负例轮一对都消失，首尾仍是两轮有效对话
+    monkeypatch.setattr(settings, "short_term_window", 10)
+    window = short_term.load_window(db_session, user_id=user.id, conversation_id=conv.id)
+    contents = [m["content"] for m in window]
+    assert "番茄炒蛋放多少盐" not in contents  # 提问连坐
+    assert "知识库中未找到相关内容。" not in contents
+    assert contents == ["学习率过大会怎样", "会震荡不收敛。", "出一道单选题", "好的题目如下。"]
+
+
+def test_load_window_all_fallback_is_empty(db_session):
+    """会话里全是兜底轮 → 剔除后空历史 → 改写不触发（零模型调用的快路保持）。"""
+    user = crud.create_user(db_session, username="u_allneg", password_hash="x")
+    conv = crud.create_conversation(db_session, user_id=user.id, title="t")
+    crud.append_message_pair(
+        db_session, conversation=conv, question="番茄炒蛋放多少盐",
+        answer="知识库中未找到相关内容。", hit=False, sources_json="[]",
+    )
+    assert short_term.load_window(db_session, user_id=user.id, conversation_id=conv.id) == []
+
+
 @pytest.mark.asyncio
 async def test_rewrite_skips_without_history(monkeypatch):
     """★无历史不触发改写——零模型调用（省一次推理 + 保证空召回路径的零调用属性）。"""
