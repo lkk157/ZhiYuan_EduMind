@@ -156,7 +156,7 @@ for idx, msg in enumerate(history):
             quiz = try_parse_quiz(msg.get("content", ""))
             if quiz:
                 render_quiz_card(quiz, key_prefix=f"quiz_{idx}", client=client)
-                render_sources(msg.get("sources") or [], client=client, key_prefix=f"src_{idx}")
+                render_sources(msg.get("sources") or [])
                 continue
             st.markdown(msg["content"])
             intent = msg.get("intent")  # 活体回答才有（回看从服务端拉，无 intent 列）
@@ -168,7 +168,7 @@ for idx, msg in enumerate(history):
                 if intent:
                     st.caption(f":material/route: 意图：{_INTENT_LABELS.get(intent, intent)}")
                 render_hit_badge(msg.get("hit", True))
-            render_sources(msg.get("sources") or [], client=client, key_prefix=f"src_{idx}")
+            render_sources(msg.get("sources") or [])
             # 范围解析降级提示（如「课件无目录，请用第X-Y页问法」）——
             # 只有活体回答带 scope_note（服务端不落库，回看不显示；见模块注释）
             if msg.get("scope_note"):

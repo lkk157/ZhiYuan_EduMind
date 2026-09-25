@@ -12,8 +12,8 @@
 import streamlit as st
 
 
-def render_sources(sources: list[dict], client=None, key_prefix: str = "src") -> None:
-    """把 [{file_name, page_no, snippet, score, group_id}] 渲染成**默认折叠**的来源详情。
+def render_sources(sources: list[dict]) -> None:
+    """把 [{file_name, page_no, snippet, score}] 渲染成**默认折叠**的来源详情。
 
     为什么折叠（2026-09-25 产品反馈「来源太长影响体验」）：
     答案末尾的【来源：文件名，第X页】已是常驻溯源（卖点所在，一行），
@@ -22,9 +22,8 @@ def render_sources(sources: list[dict], client=None, key_prefix: str = "src") ->
     于是：默认只占一个折叠条（1 行），点开才见详情；卡片边框也去掉，
     改成紧凑列表（嵌套边框在折叠层里就是纯浪费的内边距）。
 
-    client + key_prefix（体验增强包）：传了 client 才渲染「查看原页」按钮——
-    key_prefix 必须按消息位置隔离，否则多条回答的同名来源按钮会互抢状态
-    （Streamlit widget key 全页面唯一）。
+    （曾做过「查看原页」按钮，2026-09-25 产品决定移除——源文件依赖带来的
+    运维面大于预览收益，溯源靠 文件名+页码+片段+相似度 已自洽。）
     """
     if not sources:
         return
@@ -40,38 +39,6 @@ def render_sources(sources: list[dict], client=None, key_prefix: str = "src") ->
             if score is not None:
                 meta += f"（相似度 {score:.2f}）" if meta else f"相似度 {score:.2f}"
             st.markdown(f"{line}  \n{meta}" if meta else line)
-
-            # 查看原页：拉一次 PNG 缓存在 session_state（同一页不重复渲染/请求）
-            gid = src.get("group_id")
-            if client is not None and gid and src.get("file_name"):
-                btn_key = f"{key_prefix}_pg{i}"
-                img_key = f"{btn_key}_img"
-                col_a, col_b = st.columns([1, 3])
-                with col_a:
-                    has_img = st.session_state.get(img_key) is not None
-                    if st.button(
-                        "收起原页" if has_img else "查看原页",
-                        key=btn_key,
-                        icon=":material/image:",
-                    ):
-                        if has_img:
-                            st.session_state[img_key] = None
-                        else:
-                            try:
-                                st.session_state[img_key] = client.fetch_page_image(
-                                    int(gid), str(src.get("file_name")), int(src.get("page_no") or 1)
-                                )
-                            except Exception as e:  # noqa: BLE001 —— 预览失败不许炸整页，人话提示
-                                st.session_state[img_key] = None
-                                st.session_state[f"{btn_key}_err"] = str(e)
-                        st.rerun()
-                err = st.session_state.get(f"{btn_key}_err")
-                if err:
-                    st.caption(f"原页预览失败：{err}")
-                    st.session_state.pop(f"{btn_key}_err", None)
-                img = st.session_state.get(img_key)
-                if img:
-                    st.image(img, caption=f"{src.get('file_name')} · 第 {src.get('page_no')} 页")
 
 
 def render_hit_badge(hit: bool) -> None:

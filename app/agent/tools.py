@@ -55,9 +55,6 @@ def build_sources(chunks: Sequence["RetrievedChunk"]) -> list[dict]:
                 # 相似度分数透出（2026-09-25 质量优化）：用户与标定流程都看得见命中质量，
                 # SCORE_THRESHOLD 的 3正3负标定从此有数据依据而不是拍脑袋
                 "score": round(float(chunk.score), 4),
-                # group_id（体验增强包）：前端「查看原页」要带分组定位文档行——
-                # 来源契约新增只读字段，老前端忽略即兼容
-                "group_id": chunk.group_id,
             }
         )
     return sources

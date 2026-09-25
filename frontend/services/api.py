@@ -200,24 +200,6 @@ class ApiClient:
         except httpx.HTTPError as e:
             raise ApiError(0, "无法连接后端服务（uvicorn 是否已启动？）") from e
 
-    def fetch_page_image(self, group_id: int, file_name: str, page_no: int) -> bytes:
-        """取文档某页的 PNG 字节（来源卡片「查看原页」用）。失败抛 ApiError。"""
-        resp = httpx.get(
-            self.base_url + f"/kb/groups/{group_id}/page-image",
-            params={"file_name": file_name, "page_no": page_no},
-            headers=self._headers(),
-            timeout=60.0,  # PDF 首次渲染可能略慢（本机回环通常几十 ms）
-        )
-        if resp.status_code >= 400:
-            detail = None
-            try:
-                detail = resp.json().get("error")
-            except Exception:
-                detail = None
-            if isinstance(detail, dict) and detail.get("message"):
-                raise ApiError(detail.get("code", resp.status_code), detail["message"])
-            raise ApiError(resp.status_code, f"请求失败（HTTP {resp.status_code}）")
-        return resp.content
 
     # ---------- 会话历史 ----------
 

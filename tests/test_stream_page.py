@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-体验增强包单测：SSE 流式问答事件契约 + 原页图片端点（含越权/越界）。
+体验增强包单测：SSE 流式问答事件契约（原页预览功能已按产品决定移除）。
 
 为什么 SSE 事件序必须测死：前端解析器只认 data 行里的 t 字段——
 事件名/字段一漂移，前端就是黑屏或静默丢答案；且「done 才是净化后契约」
@@ -9,7 +9,6 @@
 import io
 import json
 
-import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
@@ -196,114 +195,6 @@ def test_ask_stream_false_returns_json(env, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["hit"] is True and "answer" in body and "conversation_id" in body
-
-
-# ===== 原页图片端点 =====
-
-
-def _make_pdf(path, pages: int = 3):
-    doc = pymupdf.open()
-    for i in range(pages):
-        page = doc.new_page()
-        page.insert_text((72, 72), f"Page {i + 1}")
-    doc.save(str(path))
-    doc.close()
-
-
-def test_page_image_pdf_and_guards(env, tmp_path):
-    """PDF 渲染 200 出 PNG；越界页码/非本人/不支持格式 一律人话 404。"""
-    c = env["client"]
-    tok_a = _auth(env["token_a"])
-    gid = c.post("/kb/groups", json={"name": "预览"}, headers=tok_a).json()["id"]
-
-    pdf_path = tmp_path / "课件.pdf"
-    _make_pdf(pdf_path, pages=3)
-    crud.create_document(
-        env["db"],
-        user_id=env["user_a"].id,
-        group_id=gid,
-        file_name="课件.pdf",
-        file_path=pdf_path,
-        file_hash="0" * 64,
-    )
-
-    # 正常渲染：PNG 魔数 + 第 2 页
-    r = c.get(
-        f"/kb/groups/{gid}/page-image",
-        params={"file_name": "课件.pdf", "page_no": 2},
-        headers=tok_a,
-    )
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("image/png")
-    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
-
-    # 页码越界
-    r = c.get(
-        f"/kb/groups/{gid}/page-image",
-        params={"file_name": "课件.pdf", "page_no": 99},
-        headers=tok_a,
-    )
-    assert r.status_code == 404
-    assert "超出" in r.json()["error"]["message"]
-
-    # 非本人 → 404（防探测，不泄漏文档存在性）
-    r = c.get(
-        f"/kb/groups/{gid}/page-image",
-        params={"file_name": "课件.pdf", "page_no": 1},
-        headers=_auth(env["token_b"]),
-    )
-    assert r.status_code == 404
-
-    # Word 不支持 → 人话 404（宁可不给，不给错页）
-    docx_path = tmp_path / "讲义.docx"
-    docx_path.write_bytes(b"stub")
-    crud.create_document(
-        env["db"],
-        user_id=env["user_a"].id,
-        group_id=gid,
-        file_name="讲义.docx",
-        file_path=docx_path,
-        file_hash="1" * 64,
-    )
-    r = c.get(
-        f"/kb/groups/{gid}/page-image",
-        params={"file_name": "讲义.docx", "page_no": 1},
-        headers=tok_a,
-    )
-    assert r.status_code == 404
-    assert "暂不支持" in r.json()["error"]["message"]
-
-
-def test_page_image_plain_png_bytes_passthrough(env, tmp_path):
-    """图片原件直出（页码=1）：字节原样返回、media type 正确。"""
-    c = env["client"]
-    tok_a = _auth(env["token_a"])
-    gid = c.post("/kb/groups", json={"name": "预览"}, headers=tok_a).json()["id"]
-    png_path = tmp_path / "图.png"
-    payload = b"\x89PNG\r\n\x1a\nfake-payload"
-    png_path.write_bytes(payload)
-    crud.create_document(
-        env["db"],
-        user_id=env["user_a"].id,
-        group_id=gid,
-        file_name="图.png",
-        file_path=png_path,
-        file_hash="2" * 64,
-    )
-    r = c.get(
-        f"/kb/groups/{gid}/page-image",
-        params={"file_name": "图.png", "page_no": 1},
-        headers=tok_a,
-    )
-    assert r.status_code == 200
-    assert r.content == payload
-    # 图片只有 1 页，页码 2 → 越界
-    r = c.get(
-        f"/kb/groups/{gid}/page-image",
-        params={"file_name": "图.png", "page_no": 2},
-        headers=tok_a,
-    )
-    assert r.status_code == 404
 
 
 # ===== 工具层流式回调 =====
