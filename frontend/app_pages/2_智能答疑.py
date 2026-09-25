@@ -156,7 +156,7 @@ for idx, msg in enumerate(history):
             quiz = try_parse_quiz(msg.get("content", ""))
             if quiz:
                 render_quiz_card(quiz, key_prefix=f"quiz_{idx}", client=client)
-                render_sources(msg.get("sources") or [])
+                render_sources(msg.get("sources") or [], client=client, key_prefix=f"src_{idx}")
                 continue
             st.markdown(msg["content"])
             intent = msg.get("intent")  # 活体回答才有（回看从服务端拉，无 intent 列）
@@ -168,7 +168,7 @@ for idx, msg in enumerate(history):
                 if intent:
                     st.caption(f":material/route: 意图：{_INTENT_LABELS.get(intent, intent)}")
                 render_hit_badge(msg.get("hit", True))
-            render_sources(msg.get("sources") or [])
+            render_sources(msg.get("sources") or [], client=client, key_prefix=f"src_{idx}")
             # 范围解析降级提示（如「课件无目录，请用第X-Y页问法」）——
             # 只有活体回答带 scope_note（服务端不落库，回看不显示；见模块注释）
             if msg.get("scope_note"):
@@ -176,22 +176,67 @@ for idx, msg in enumerate(history):
         else:
             st.markdown(msg["content"])
 
+
+def _history_to_markdown(items: list[dict]) -> str:
+    """当前对话 → 复习笔记 Markdown（体验增强包：会话导出）。
+
+    纯前端拼装（对话就在 session_state，零后端改动）；来源逐条列出，
+    导出的笔记保留「可核对」这一核心价值，而不只是问答文本。
+    """
+    lines = ["# 知源 · 问答笔记", ""]
+    for m in items:
+        if m["role"] == "user":
+            lines += ["## 提问", "", m.get("content", ""), ""]
+        else:
+            lines += ["## 回答", "", m.get("content", ""), ""]
+            for s in m.get("sources") or []:
+                score = s.get("score")
+                score_txt = f"（相似度 {score:.2f}）" if score is not None else ""
+                lines.append(f"- {s.get('file_name', '?')} 第 {s.get('page_no', '?')} 页{score_txt}")
+            if m.get("sources"):
+                lines.append("")
+    return "\n".join(lines)
+
+
 if history:
-    # 「清空」升级为「删除当前会话」：历史已落库，只清本地缓存的话刷新一下就回来了——
-    # 想真正删必须删服务端会话（级联删消息），UI 承诺与实际行为必须一致
-    if st.button("删除当前对话", icon=":material/delete:"):
-        conv_id = st.session_state.get("chat_conv_id")
-        try:
-            if conv_id is not None:
-                client.delete_conversation(conv_id)
-        except ApiError as e:
-            st.error(e.message)
-            st.stop()
-        # 本地状态归零；选择器归位交给下次重跑的「陈旧夹紧」——
-        # 旧 id 已从列表消失，夹紧逻辑会把它带回新对话哨兵（无需再写 pending）
-        st.session_state.chat_history = []
-        st.session_state.chat_conv_id = None
-        st.rerun()
+    # 删除会话（真正删服务端，UI 承诺与行为一致）+ 导出笔记（当前会话内容下载）
+    col_del, col_export = st.columns(2)
+    with col_del:
+        if st.button("删除当前对话", icon=":material/delete:", width="stretch"):
+            conv_id = st.session_state.get("chat_conv_id")
+            try:
+                if conv_id is not None:
+                    client.delete_conversation(conv_id)
+            except ApiError as e:
+                st.error(e.message)
+                st.stop()
+            # 本地状态归零；选择器归位交给下次重跑的「陈旧夹紧」——
+            # 旧 id 已从列表消失，夹紧逻辑会把它带回新对话哨兵（无需再写 pending）
+            st.session_state.chat_history = []
+            st.session_state.chat_conv_id = None
+            st.rerun()
+    with col_export:
+        st.download_button(
+            "导出笔记 (.md)",
+            data=_history_to_markdown(history),
+            file_name="知源问答笔记.md",
+            mime="text/markdown",
+            icon=":material/download:",
+            width="stretch",
+        )
+
+# 示例问题（空对话冷启动）：点击写 pending_prompt，与 chat_input 走同一条提问路径——
+# 不另写处理逻辑，避免两条路径漂移（体验增强包 #4）
+if not history:
+    st.caption("不知道问什么？试试：")
+    ex_cols = st.columns(3)
+    for ex_col, example in zip(
+        ex_cols, ["这个知识库讲了什么？", "总结第1-5页", "出3道随堂测"]
+    ):
+        with ex_col:
+            if st.button(example, key=f"exq_{example}", width="stretch"):
+                st.session_state["pending_prompt"] = example
+                st.rerun()
 
 # submit_mode="disable"：回答生成期间禁用输入框——防止连发把 7B 推理队列打成长龙
 # （后端虽有互斥闸门兜底，前端体验上也不该让用户误以为「卡了」）
@@ -199,6 +244,7 @@ prompt = st.chat_input(
     "提问 / 出题（如：出3道题）/ 总结上一节 / 纯算式计算",
     submit_mode="disable",
 )
+prompt = prompt or st.session_state.pop("pending_prompt", None)  # 示例问题注入
 if prompt:
     if not selected_groups:
         st.warning("请先选择检索分组再提问。")
@@ -225,22 +271,41 @@ if prompt:
             st.session_state["conv_selector_pending"] = conv_id
 
         try:
-            # group_ids 显式传选中分组（后端还会逐个校验归属，防越权检索）
-            result = client.ask(
-                prompt,
-                group_ids=[name_to_id[n] for n in selected_groups],
-                conversation_id=conv_id,
-                guide_mode=bool(st.session_state.get("guide_mode")),
-            )
+            final: dict = {}
+
+            def _tokens():
+                """SSE 事件 → 打字机增量；done 存入 final、error 转统一 ApiError。"""
+                for event in client.ask_stream(
+                    prompt,
+                    group_ids=[name_to_id[n] for n in selected_groups],
+                    conversation_id=conv_id,
+                    guide_mode=bool(st.session_state.get("guide_mode")),
+                ):
+                    kind = event.get("t")
+                    if kind == "delta":
+                        yield event.get("v") or ""
+                    elif kind == "done":
+                        final.update(event)
+                    elif kind == "error":
+                        raise ApiError(int(event.get("code", 500)), event.get("message") or "生成失败")
+
+            # 打字机逐字上屏：qa/总结有 delta；出题/计算无 delta（write_stream 立即返回），
+            # done 后由重跑渲染循环出卡片/结果——所有分支最终以 done（净化后契约）为准。
+            # 已知小瑕疵：若资料不足闸门触发，流上屏的是模型原始「无法回答…」开头文本，
+            # 重跑后替换为兜底话术（两者语义一致，仅文案归一）。
+            st.write_stream(_tokens)
+            if not final:
+                raise ApiError(500, "流式响应异常中断（未收到结果）")
+
             # 落历史缓存（intent/scope_note 只活在本会话内存里，回看时服务端没有该字段——见模块注释）
             history.append(
                 {
                     "role": "assistant",
-                    "content": result["answer"],
-                    "sources": result.get("sources") or [],
-                    "hit": result["hit"],
-                    "intent": result.get("intent"),
-                    "scope_note": result.get("scope_note"),
+                    "content": final["answer"],
+                    "sources": final.get("sources") or [],
+                    "hit": final["hit"],
+                    "intent": final.get("intent"),
+                    "scope_note": final.get("scope_note"),
                 }
             )
             # 重跑后由上方统一渲染循环上屏（成功/失败两条路径同构，避免两处逻辑漂移）

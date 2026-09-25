@@ -17,7 +17,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, UploadFile, Response, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_current_user
@@ -239,6 +239,57 @@ async def upload_documents(
 
     succeeded = sum(1 for r in results if r["ok"])
     return {"results": results, "succeeded": succeeded, "failed": len(results) - succeeded}
+
+
+# 支持原页预览的图片后缀 → media type（图片文件直出字节，不重渲染）
+_IMAGE_MEDIA = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+@router.get("/groups/{gid}/page-image")
+def page_image(
+    gid: int,
+    file_name: str,
+    page_no: int,
+    user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """渲染文档某一页为 PNG（体验增强包：来源卡片「查看原页」的数据源）。
+
+    为什么 PDF 用 pymupdf 2x 渲染而不是复用入库时的 OCR 图：入库图只覆盖
+    空文本页，而「查看原页」任何页都可能被点（用户就是要看原件）；2x 缩放是
+    渲染清晰度与响应体积的平衡（答辩演示走本机回环，几十 ms 足够）。
+
+    为什么 Word/PPT 直接人话 404：Word 无稳定分页（入库是逻辑页概念）、
+    PPT 幻灯片渲染另有一套——强行对齐页码会显示错误的页面（比不显示更糟），
+    「如实说不支持」好过「给个错的」。
+    越权口径与其余 kb 端点一致：分组/文档任一非本人 → 404 防探测。
+    """
+    _require_group(db, user_id=user.id, group_id=gid)
+    doc = crud.get_document_by_name(db, user_id=user.id, group_id=gid, file_name=file_name)
+    if doc is None:
+        raise NotFoundError("文档不存在")
+    path = Path(doc.file_path)
+    if not path.is_file():
+        raise NotFoundError("文件已不存在")
+
+    suffix = path.suffix.lower()
+    if suffix in _IMAGE_MEDIA:
+        # 图片原件直出（入库的就是它本身，页码=1）
+        if page_no != 1:
+            raise NotFoundError("页码超出文档范围")
+        return Response(content=path.read_bytes(), media_type=_IMAGE_MEDIA[suffix])
+
+    if suffix == ".pdf":
+        import pymupdf
+
+        with pymupdf.open(str(path)) as pdf:
+            if not 1 <= page_no <= pdf.page_count:
+                raise NotFoundError("页码超出文档范围")
+            # 2x 矩阵渲染：72dpi 原始渲染在高分屏上发虚（OCR 阶段同款取舍）
+            pix = pdf[page_no - 1].get_pixmap(matrix=pymupdf.Matrix(2, 2))
+            return Response(content=pix.tobytes("png"), media_type="image/png")
+
+    raise AppError("该格式暂不支持原页预览（支持 PDF 与图片）", code=404)
 
 
 @router.delete("/documents/{did}")

@@ -14,9 +14,13 @@ message 表无该列，加列需迁移，回看时按内容特征识别，见 M4
 显存红线自查：本文件零直接模型调用；run_agent 内部（改写/分类/生成）全部
 经 gateway 的 Semaphore(1)+Lock 串行排队，单轮最多 3 次顺序调用，无并发推理。
 """
+import asyncio
 import json
+import logging
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.agent.graph import run_agent
@@ -31,6 +35,8 @@ from app.db.session import get_db
 
 # 路由前缀 /chat：问答接口挂在它下面（层间契约的路由路径，禁止改动）
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+logger = logging.getLogger(__name__)
 
 
 class AskRequest(BaseModel):
@@ -51,6 +57,9 @@ class AskRequest(BaseModel):
     conversation_id: int | None = None
     # M4 引导式答疑（苏格拉底模式）：True 时 qa 工具改用引导式 system（默认关闭）
     guide_mode: bool = False
+    # 体验增强包：True 时响应为 SSE 流（delta/done/error 事件），False=既有 JSON——
+    # 默认 false 让老调用方（demo_e2e/既有单测）零感知
+    stream: bool = False
 
 
 class ConversationCreateRequest(BaseModel):
@@ -200,7 +209,24 @@ async def ask(
     page_range = scope.get("page_range") if scope else None
     scope_file = scope.get("file_name") if scope else None
 
-    # 3) Agent 状态图：计算旁路/改写 → 检索（带范围过滤） → 分类 → 四工具（布局见 agent/graph.py）
+    # 3) 分流：SSE 流式 / 既有 JSON（校验都在上面完成——404 类错误在流开始前就返回）
+    if body.stream:
+        return StreamingResponse(
+            _ask_sse(
+                db,
+                conversation=conversation,
+                body=body,
+                user_id=user.id,
+                group_ids=group_ids,
+                history=history,
+                page_range=page_range,
+                scope_file=scope_file,
+                scope_note=scope_note,
+            ),
+            media_type="text/event-stream",
+        )
+
+    # 3N) Agent 状态图：计算旁路/改写 → 检索（带范围过滤） → 分类 → 四工具（布局见 agent/graph.py）
     result = await run_agent(
         question=body.question,
         user_id=user.id,
@@ -211,9 +237,14 @@ async def ask(
         file_name=scope_file,
         scope_note=scope_note,
     )
+    _persist_result(db, conversation, body, result)
+    return {**result, "conversation_id": body.conversation_id}
 
-    # 4) 会话落库（可选）：hit=false 的兜底轮同样落库（历史不许选择性失忆）；
-    #    sources 用 ensure_ascii=False 存原文——运维 SELECT * 直接可读
+
+def _persist_result(db, conversation, body, result: dict) -> None:
+    """会话落库（JSON/SSE 两分支共用，杜绝一条落库一条忘的漂移）：
+    hit=false 的兜底轮同样落库（历史不许选择性失忆）；
+    sources 用 ensure_ascii=False 存原文——运维 SELECT * 直接可读。"""
     if conversation is not None:
         crud.append_message_pair(
             db,
@@ -223,7 +254,85 @@ async def ask(
             hit=result["hit"],
             sources_json=json.dumps(result["sources"], ensure_ascii=False),
         )
-    return {**result, "conversation_id": body.conversation_id}
+
+
+def _sse(obj: dict) -> str:
+    """dict → SSE data 行（ensure_ascii=False：中文 token 原样上屏，转义会伤打字机观感）。"""
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+
+async def _ask_sse(
+    db,
+    *,
+    conversation,
+    body: AskRequest,
+    user_id: int,
+    group_ids: list[int],
+    history: list[dict],
+    page_range,
+    scope_file,
+    scope_note,
+) -> AsyncIterator[str]:
+    """SSE 问答流：后台跑 Agent，token 经队列回吐成 delta 事件，收尾发 done/error。
+
+    为什么用「后台任务 + 队列」而不是边跑边 yield：run_agent 是一次 await 调用，
+    中途拿不到 token——把它的 on_delta 回调接进队列，生成器这端就能边收边发。
+    这不是并发推理：on_delta 只是把 token 塞进内存队列，唯一的 generate 仍在
+    gateway 锁内从头流到尾（红线自查通过）。
+
+    事件契约（前端按此分发）：
+      {"t":"delta","v":"…"}   逐字增量（仅 qa/总结有；出题/计算直接等 done）
+      {"t":"done", …run_agent 四字段, "conversation_id":…}  终局结果=净化后契约
+      {"t":"error","message":"…"}  出错（不再有 done）
+    落库发生在 done 之前——前端收到 done 时服务端已写完，回看无时差。
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _run() -> None:
+        try:
+            result = await run_agent(
+                question=body.question,
+                user_id=user_id,
+                group_ids=group_ids,
+                history=history,
+                guide_mode=body.guide_mode,
+                page_range=page_range,
+                file_name=scope_file,
+                scope_note=scope_note,
+                # 同步回调直塞队列：put_nowait 非阻塞，不卡生成循环
+                on_delta=lambda s: queue.put_nowait(("delta", s)),
+            )
+        except Exception as e:  # noqa: BLE001 —— 流内必须以 error 事件收尾，不能让 SSE 裸断
+            logger.exception("SSE 问答流执行失败")
+            message = e.message if hasattr(e, "message") else "服务器内部错误，请稍后重试"
+            queue.put_nowait(("error", message))
+        else:
+            queue.put_nowait(("done", result))
+
+    task = asyncio.create_task(_run())
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "delta":
+                yield _sse({"t": "delta", "v": payload})
+            elif kind == "done":
+                _persist_result(db, conversation, body, payload)
+                yield _sse(
+                    {"t": "done", **payload, "conversation_id": body.conversation_id}
+                )
+                return
+            else:  # error
+                yield _sse({"t": "error", "message": payload})
+                return
+    finally:
+        # 消费端提前 return（前端断连等）：任务若还在跑就取消——
+        # 不取消会继续白跑一次完整生成还往没人听的队列里塞 token
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
 
 class ScoreRequest(BaseModel):

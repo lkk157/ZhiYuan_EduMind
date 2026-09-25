@@ -18,8 +18,9 @@ Ollama 调用网关：★ 显存红线（CLAUDE.md §3）的代码落点，全�
   生产环境把实现换成 Redis 分布式锁即可。
 """
 import asyncio
+import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -112,6 +113,69 @@ class OllamaGateway:
             async with self._mutex:
                 data = await self._post_json("/api/generate", payload)
         return data.get("response", "")
+
+    async def generate_stream(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        system: str | None = None,
+        images: list[str] | None = None,
+        keep_alive: str | int | None = None,
+        num_ctx: int | None = None,
+        num_predict: int = 512,
+        temperature: float = 0.7,
+    ) -> AsyncIterator[str]:
+        """流式生成：逐段 yield 文本增量（参数语义与 generate 完全一致）。
+
+        为什么锁要覆盖「整段流」而不是每段一把：红线管的是「同一时刻只有一个
+        生成在飞」——流式下一次生成横跨数秒/数十秒，若逐段释放锁，另一个请求
+        会在两段之间插进来变成并发推理。queue+mutex 从首个字节持有到最后一个
+        字节，流式只是传输方式变化，互斥语义与非流式一字不差。
+
+        为什么不用 _post_json：它等整包 JSON；Ollama stream=true 返回的是
+        逐行 NDJSON（{"response":"token"}），必须走 httpx.stream 逐行读。
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "stream": True,  # ★ 流式开关（与 generate 的唯一差异）
+            "keep_alive": settings.llm_keep_alive if keep_alive is None else keep_alive,
+            "options": {
+                "num_ctx": settings.llm_num_ctx if num_ctx is None else num_ctx,
+                "num_predict": num_predict,
+                "temperature": temperature,
+            },
+        }
+        if system:
+            payload["system"] = system
+        if images:
+            payload["images"] = images
+
+        async with self._queue:
+            async with self._mutex:
+                try:
+                    async with httpx.AsyncClient(base_url=self.base_url) as client:
+                        async with client.stream(
+                            "POST", "/api/generate", json=payload, timeout=self.timeout
+                        ) as resp:
+                            resp.raise_for_status()
+                            async for line in resp.aiter_lines():
+                                if not line.strip():
+                                    continue
+                                try:
+                                    data = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue  # 非 JSON 行（偶发日志行）跳过，不让整条流崩掉
+                                piece = data.get("response", "")
+                                if piece:
+                                    yield piece
+                                if data.get("done"):
+                                    break
+                except httpx.HTTPStatusError as e:
+                    raise UpstreamError(f"Ollama 返回错误状态 {e.response.status_code}") from e
+                except httpx.HTTPError as e:
+                    raise UpstreamError("无法连接 Ollama 服务（是否已启动？）") from e
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """批量文本向量化，返回与输入等长的向量列表。

@@ -55,6 +55,9 @@ def build_sources(chunks: Sequence["RetrievedChunk"]) -> list[dict]:
                 # 相似度分数透出（2026-09-25 质量优化）：用户与标定流程都看得见命中质量，
                 # SCORE_THRESHOLD 的 3正3负标定从此有数据依据而不是拍脑袋
                 "score": round(float(chunk.score), 4),
+                # group_id（体验增强包）：前端「查看原页」要带分组定位文档行——
+                # 来源契约新增只读字段，老前端忽略即兼容
+                "group_id": chunk.group_id,
             }
         )
     return sources
@@ -65,6 +68,37 @@ def _fallback(intent: str) -> dict:
     return {"answer": FALLBACK_MESSAGE, "sources": [], "hit": False, "intent": intent}
 
 
+async def _generate(
+    *,
+    system: str,
+    prompt: str,
+    num_predict: int,
+    temperature: float,
+    on_delta=None,
+) -> str:
+    """最终答案生成的双模入口：无回调=非流式（既有路径），有回调=流式逐段回吐。
+
+    为什么收口在一个函数：qa/summary 两条流式路径与非流式路径的参数完全同源，
+    分散写四处（两工具×两模式）迟早漂移；后处理（净化/闸门/拼来源）仍在各自工具里，
+    本函数只管「怎么把字要回来」——流式只是传输，生成语义与红线（锁覆盖整段流，
+    见 llm.generate_stream 注释）都不在这里重写。
+    """
+    kwargs = dict(
+        model=settings.llm_model,
+        prompt=prompt,
+        system=system,
+        num_predict=num_predict,
+        temperature=temperature,
+    )
+    if on_delta is None:
+        return await gateway.generate(**kwargs)
+    pieces: list[str] = []
+    async for piece in gateway.generate_stream(**kwargs):
+        pieces.append(piece)
+        on_delta(piece)  # 同步回调（SSE 场景=queue.put_nowait，绝不阻塞事件循环）
+    return "".join(pieces)
+
+
 # ===== 答疑工具（自 chat.py 原样平移）=====
 
 
@@ -73,19 +107,22 @@ async def qa_tool(
     chunks: list[RetrievedChunk],
     *,
     guide_mode: bool = False,
+    on_delta=None,
 ) -> dict:
     """命中资料后的标准问答：生成 → 净化伪来源 → 资料不足闸门 → 强制拼真来源。
 
     三层防线与闸门的语义见模块 docstring——本函数是它们唯一的现行宿主，
     改动前先想清楚「答辩演示的卖点还在不在」。
+    on_delta：流式回调（体验增强包）——**闸门/净化在流完后统一做**，
+    流出去的是原始 token、返回的 done 是净化结果，两边一致性由前端以 done 为准。
     """
     system, prompt = build_qa_prompt(question, chunks, guide=guide_mode)
-    raw = await gateway.generate(
-        model=settings.llm_model,
-        prompt=prompt,
+    raw = await _generate(
         system=system,
+        prompt=prompt,
         num_predict=512,  # 输出长度受控（显存红线）
         temperature=0.3,  # 低温度：问答忠于资料，减少发挥
+        on_delta=on_delta,
     )
     answer = sanitize_answer(raw)
     # 资料不足闸门（2026-09-24）：模型说不知道 → 兜底、不拼来源
@@ -182,7 +219,9 @@ async def quiz_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
 # ===== 总结工具 =====
 
 
-async def summary_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
+async def summary_tool(
+    question: str, chunks: list[RetrievedChunk], *, on_delta=None
+) -> dict:
     """总结：依据命中资料输出要点列表（净化/闸门/拼来源与问答完全同构）。
 
     top_k_summary 默认比问答池大：总结要覆盖更全，配合范围过滤（页码/章节）
@@ -190,12 +229,12 @@ async def summary_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
     """
     chunks = chunks[: settings.top_k_summary]
     system, prompt = build_summary_prompt(question, chunks)
-    raw = await gateway.generate(
-        model=settings.llm_model,
-        prompt=prompt,
+    raw = await _generate(
         system=system,
+        prompt=prompt,
         num_predict=512,
         temperature=0.3,
+        on_delta=on_delta,
     )
     answer = sanitize_answer(raw)
     if is_insufficient_answer(answer):

@@ -14,6 +14,7 @@ cache_resource 是**全进程共享**的——多标签页/多用户会共用同
 把 token 放进去等于跨用户串号。ApiClient 每次脚本重跑现建只花几毫秒，
 用完即弃，安全远比省一次握手重要（session-state 参考文档的同款告诫）。
 """
+import json
 import os
 
 import httpx
@@ -151,6 +152,72 @@ class ApiClient:
         """试题判分：quiz=出题返回的试题 JSON 对象，answers=按题序作答；
         返回 {score, comment}。单选全卷后端零 LLM 直接算，简答走模型按要点给分。"""
         return self._request("POST", "/chat/score", json={"quiz": quiz, "answers": answers})
+
+    def ask_stream(
+        self,
+        question: str,
+        group_ids: list[int] | None = None,
+        conversation_id: int | None = None,
+        guide_mode: bool = False,
+    ):
+        """SSE 流式提问（生成器）：逐个产出事件 dict——
+        {"t":"delta","v":"字"} / {"t":"done", answer,sources,hit,intent,…} / {"t":"error","message"}。
+
+        为什么单独开这个方法而不是改 ask：ask 的 JSON 契约有 demo_e2e 与
+        大量单测依赖，流式是新增能力（后端 stream=true 分支），两条路各走各的。
+        连接层错误照旧翻译成 ApiError；协议内 error 事件原样交调用方处理
+        （调用方要区分「已流出半截字」与「压根没开始」两种现场）。
+        """
+        payload = {
+            "question": question,
+            "group_ids": group_ids,
+            "conversation_id": conversation_id,
+            "guide_mode": guide_mode,
+            "stream": True,
+        }
+        try:
+            with httpx.stream(
+                "POST",
+                self.base_url + "/chat/ask",
+                json=payload,
+                headers=self._headers(),
+                timeout=_LONG_TIMEOUT,  # 整段流可能持续到生成结束
+            ) as resp:
+                if resp.status_code >= 400:
+                    # 流开始前的错误（404 越权等）：非 SSE，按统一错误出口解析
+                    body_bytes = resp.read()
+                    detail = None
+                    try:
+                        detail = json.loads(body_bytes).get("error")
+                    except Exception:
+                        detail = None
+                    if isinstance(detail, dict) and detail.get("message"):
+                        raise ApiError(detail.get("code", resp.status_code), detail["message"])
+                    raise ApiError(resp.status_code, f"请求失败（HTTP {resp.status_code}）")
+                for line in resp.iter_lines():
+                    if line.startswith("data: "):
+                        yield json.loads(line[len("data: "):])
+        except httpx.HTTPError as e:
+            raise ApiError(0, "无法连接后端服务（uvicorn 是否已启动？）") from e
+
+    def fetch_page_image(self, group_id: int, file_name: str, page_no: int) -> bytes:
+        """取文档某页的 PNG 字节（来源卡片「查看原页」用）。失败抛 ApiError。"""
+        resp = httpx.get(
+            self.base_url + f"/kb/groups/{group_id}/page-image",
+            params={"file_name": file_name, "page_no": page_no},
+            headers=self._headers(),
+            timeout=60.0,  # PDF 首次渲染可能略慢（本机回环通常几十 ms）
+        )
+        if resp.status_code >= 400:
+            detail = None
+            try:
+                detail = resp.json().get("error")
+            except Exception:
+                detail = None
+            if isinstance(detail, dict) and detail.get("message"):
+                raise ApiError(detail.get("code", resp.status_code), detail["message"])
+            raise ApiError(resp.status_code, f"请求失败（HTTP {resp.status_code}）")
+        return resp.content
 
     # ---------- 会话历史 ----------
 

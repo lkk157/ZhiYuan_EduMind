@@ -48,6 +48,9 @@ class AgentState(TypedDict, total=False):
     group_ids: list[int]
     history: list[dict]
     guide_mode: bool
+    # 流式回调（体验增强包）：可选的同步 callable(str)->None，qa/summary 逐 token 回吐；
+    # 出题/计算不接（JSON 结构要整包解析）。None = 非流式（既有路径，单测全走这条）
+    on_delta: Any
     # 范围过滤（agent/scope.py 在接口层解析后传入，图内只负责透传给检索）
     page_range: tuple[int, int] | None
     file_name: str | None
@@ -105,7 +108,10 @@ async def _node_fallback(state: AgentState) -> dict:
 
 async def _node_qa(state: AgentState) -> dict:
     return await tools.qa_tool(
-        state["question"], state["chunks"], guide_mode=bool(state.get("guide_mode"))
+        state["question"],
+        state["chunks"],
+        guide_mode=bool(state.get("guide_mode")),
+        on_delta=state.get("on_delta"),
     )
 
 
@@ -114,7 +120,9 @@ async def _node_quiz(state: AgentState) -> dict:
 
 
 async def _node_summary(state: AgentState) -> dict:
-    return await tools.summary_tool(state["question"], state["chunks"])
+    return await tools.summary_tool(
+        state["question"], state["chunks"], on_delta=state.get("on_delta")
+    )
 
 
 async def _node_calc(state: AgentState) -> dict:
@@ -185,6 +193,7 @@ async def run_agent(
     page_range: tuple[int, int] | None = None,
     file_name: str | None = None,
     scope_note: str | None = None,
+    on_delta: Any = None,
 ) -> dict[str, Any]:
     """跑一轮 Agent，返回 {answer, sources, hit, intent, scope_note} 契约。
 
@@ -203,6 +212,7 @@ async def run_agent(
             "page_range": page_range,
             "file_name": file_name,
             "scope_note": scope_note,
+            "on_delta": on_delta,
         }
     )
     return {
