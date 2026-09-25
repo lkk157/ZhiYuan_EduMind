@@ -13,22 +13,29 @@ import streamlit as st
 
 
 def render_sources(sources: list[dict]) -> None:
-    """把 [{file_name, page_no, snippet}] 渲染成来源卡片列表（与答案末尾【来源】同序）。"""
+    """把 [{file_name, page_no, snippet, score}] 渲染成**默认折叠**的来源详情。
+
+    为什么折叠（2026-09-25 产品反馈「来源太长影响体验」）：
+    答案末尾的【来源：文件名，第X页】已是常驻溯源（卖点所在，一行），
+    下面再平铺「标题 + 每来源一张带边框卡片 + 80 字片段」等于把同一件事
+    说了三遍、3 个来源占半屏——常态是扫一眼页码，核对片段才是低频动作。
+    于是：默认只占一个折叠条（1 行），点开才见详情；卡片边框也去掉，
+    改成紧凑列表（嵌套边框在折叠层里就是纯浪费的内边距）。
+    """
     if not sources:
         return
-    st.markdown(":material/link: **来源**")
-    for i, src in enumerate(sources, start=1):
-        with st.container(border=True):
-            # 序号 + 文件名 + 页码：溯源三要素一眼可见（答辩演示就指这里）
-            st.markdown(f"**{i}. {src.get('file_name', '?')} · 第 {src.get('page_no', '?')} 页**")
-            # 片段是「让用户核对出处」的证据，用 caption 弱化不抢答案的视觉焦点；
-            # 相似度分数（2026-09-25 起后端透出）让用户看见命中质量，也是阈值标定的数据来源
-            snippet = src.get("snippet", "")
+    with st.expander(f":material/link: 来源（{len(sources)} 项）"):
+        for i, src in enumerate(sources, start=1):
+            # 一行一来源：序号+文件+页码在前（溯源三要素），片段与相似度跟在破折号后
+            line = f"**{i}. {src.get('file_name', '?')} · 第 {src.get('page_no', '?')} 页**"
+            snippet = (src.get("snippet") or "").strip()
             score = src.get("score")
+            meta = ""
+            if snippet:
+                meta += snippet
             if score is not None:
-                st.caption(f"{snippet}（相似度 {score:.2f}）" if snippet else f"相似度 {score:.2f}")
-            else:
-                st.caption(snippet)
+                meta += f"（相似度 {score:.2f}）" if meta else f"相似度 {score:.2f}"
+            st.markdown(f"{line}  \n{meta}" if meta else line)
 
 
 def render_hit_badge(hit: bool) -> None:
