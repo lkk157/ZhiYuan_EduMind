@@ -1,6 +1,6 @@
 # 知源 ZhiYuan_EduMind
 
-基于**多模态 RAG + Agent** 的高校学科教育智能答疑系统：支持 PPT/PDF/Word/图片多模态知识库（图表/公式经视觉模型识别入库）、精准溯源问答（回答末尾强制【来源：文件名，页码】）、Agent 智能调度（答疑/出题/总结）、长效记忆与个性化辅助。
+基于**多模态 RAG + Agent** 的高校学科教育智能答疑系统：支持 PPT/PDF/Word/图片多模态知识库（图表/公式经视觉模型识别入库）、精准溯源问答（回答末尾强制【来源：文件名，页码】）、Agent 智能调度（答疑/出题/总结）、长效记忆与个性化辅助（错题本/学习周报/知识点图谱推荐），并内置学习数据看板（提问热度/命中率/高频知识点）。
 本科毕业设计项目，演示环境为单台 RTX 4060 笔记本；架构按生产思维设计，并给出 8G 显存约束下的降级落地方案。
 
 ## 运行环境
@@ -39,7 +39,7 @@
 ## 快速开始
 1. **模型准备**（Ollama 已安装的前提下）：
    ```bash
-   ollama pull qwen2.5:7b-instruct-q4_K_M   # LLM（本机已装则跳过）
+   ollama pull qwen2.5:7b-instruct-q4_K_M   # LLM
    ollama pull qwen3-embedding:0.6b
    ollama pull glm-ocr                       # 视觉/OCR 定为 GLM-OCR（2.2GB 轻量；若失败 fallback deepseek-ocr
                                              # 或 qwen2.5-vl:3b，并同步修改 .env 中 OCR_MODEL）

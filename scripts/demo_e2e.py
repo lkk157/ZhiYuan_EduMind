@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-M2 端到端演示脚本：一份 docx 从入库到问答的全链路自检（python scripts/demo_e2e.py）。
+端到端演示脚本（M2 起建，M6 补齐为全流程版）：一份 docx 从入库到看板的全链路自检。
 
 为什么要做这个脚本而不是只靠单测：
 单测把 gateway / 向量库都换成假件，证明的是「代码逻辑对」；
 答辩现场要证明的是「真服务 + 真 Ollama + 真 Chroma 串起来还能对」——
-本脚本走真实 HTTP 接口（/auth /kb /chat），只在最外层断言用户能看到的结果，
-正是答辩演示脚本：注册 → 建组 → 传课件 → 正例提问（必须带来源）→ 负例提问（必须兜底不编造）。
+本脚本走真实 HTTP 接口，只在最外层断言用户能看到的结果：
+注册 → 建组 → 传课件 → 正例（必须带来源）→ 负例（必须兜底不编造）→
+会话回看 → 出题（真 LLM）→ 判分落错题本 → 看板对账（M6 验收口径）。
 
-为什么正例断言盯「来源：」、负例断言盯「未找到」：
-这两条正是本项目的两条卖点——溯源可核对、空召回不调 LLM 防幻觉。
-演示成败就看这两条断言，所以单独列在检查清单里。
+为什么出题赌真 LLM 而判分用脚本自带卷：
+出题就是产品链路本身（intent=quiz + 试卷可解析），脚本必须验它，红了就该红——
+现场要演示的东西提前暴露不稳比翻车强；判分/错题本/看板这些下游环节不必再叠加
+生成随机性——自带固定单选卷让 score→quiz_records→overview 的对账完全确定。
 
 用法（需先本地启动服务：uvicorn app.main:app --port 8000）：
     python scripts/demo_e2e.py
@@ -45,6 +47,35 @@ KNOWLEDGE_TEXT = (
 # 正例：直指上述知识点；负例：与课件完全无关，用于验证空召回兜底（防幻觉）
 QUESTION_POSITIVE = "梯度下降的学习率过大会有什么后果？"
 QUESTION_NEGATIVE = "请问番茄炒蛋要放多少盐？"
+# 出题指令（真 LLM 步骤）：明确题型+道数，验证意图分类与题型服从
+QUESTION_QUIZ = "根据课件内容出 2 道单选题。"
+
+# 演示课件文件名提为常量：上传后 steps 10–12（判分锚/错题本/看板）都要按名对账，
+# 而临时目录在上传步骤结束就删了——引用 Path 对象既越作用域也不必要
+DEMO_DOC_NAME = "demo_knowledge.docx"
+
+# 判分用固定单选卷（不赌 7B 生成）：第 1 题答对、第 2 题答错——
+# 期望 score=50、recorded=1，下游错题本/看板对账全靠这份确定性
+FIXED_QUIZ = {
+    "type": "quiz",
+    "questions": [
+        {
+            "type": "choice",
+            "question": "学习率过大会导致什么？",
+            "options": ["A. 损失震荡不收敛", "B. 立即全局最优", "C. 梯度消失", "D. 过拟合"],
+            "answer": "A",
+            "explanation": "震荡甚至发散。",
+        },
+        {
+            "type": "choice",
+            "question": "缓解学习率过大的常用手段是？",
+            "options": ["A. 翻倍学习率", "B. 调小或衰减", "C. 关闭梯度", "D. 增大数据集到TB级"],
+            "answer": "B",
+            "explanation": "调小或改用衰减策略。",
+        },
+    ],
+}
+FIXED_ANSWERS = ["A", "A"]  # 第 1 对第 2 错（第 2 题标准答案 B）：喂给错题本一条真实错题
 
 # 检查清单文案刻意用纯 ASCII：GBK 控制台下中文/emoji 可能乱码甚至崩溃
 # （CLAUDE.md Windows 规范），排查信息里的原始响应用 ensure_ascii=True 打印同理
@@ -115,7 +146,7 @@ def main() -> int:
 
         # ---- 4. 造 docx 并上传 ----
         with tempfile.TemporaryDirectory(prefix="zhiyuan_demo_") as tmp:
-            docx_path = Path(tmp) / "demo_knowledge.docx"
+            docx_path = Path(tmp) / DEMO_DOC_NAME
             build_demo_docx(docx_path)
             # multipart 上传：字段名 file 与 POST /kb/groups/{gid}/documents 的 UploadFile 形参一致
             resp = client.post(
@@ -138,10 +169,16 @@ def main() -> int:
             if not report("upload docx and ingest chunks", upload_ok, resp.text):
                 return finish()
 
-        # ---- 5. 正例提问：必须命中且带溯源 ----
+        # ---- 5. 建会话（后续三次提问都挂它：问答落库 = 会话回看与看板的数据源）----
+        resp = client.post("/chat/conversations", json={"title": "演示会话"}, headers=auth)
+        conv_id = resp.json().get("id") if resp.status_code == 201 else None
+        if not report("create conversation (201)", resp.status_code == 201 and conv_id is not None, resp.text):
+            return finish()
+
+        # ---- 6. 正例提问：必须命中且带溯源 ----
         resp = client.post(
             "/chat/ask",
-            json={"question": QUESTION_POSITIVE, "group_ids": [group_id]},
+            json={"question": QUESTION_POSITIVE, "group_ids": [group_id], "conversation_id": conv_id},
             headers=auth,
         )
         positive_ok = resp.status_code == 200
@@ -160,10 +197,10 @@ def main() -> int:
             resp.text,
         )
 
-        # ---- 6. 负例提问：必须兜底（hit=false 且话术含「未找到」），验证不调 LLM 防幻觉 ----
+        # ---- 7. 负例提问：必须兜底（hit=false 且话术含「未找到」），验证不调 LLM 防幻觉 ----
         resp = client.post(
             "/chat/ask",
-            json={"question": QUESTION_NEGATIVE, "group_ids": [group_id]},
+            json={"question": QUESTION_NEGATIVE, "group_ids": [group_id], "conversation_id": conv_id},
             headers=auth,
         )
         negative_ok = resp.status_code == 200
@@ -174,6 +211,86 @@ def main() -> int:
         report(
             "negative ask answer is fallback wording",
             "未找到" in negative_body.get("answer", ""),
+            resp.text,
+        )
+
+        # ---- 8. 会话回看：两轮问答已落库（回看历史 = 命中徽章/来源可还原）----
+        resp = client.get(f"/chat/conversations/{conv_id}/messages", headers=auth)
+        msgs = resp.json() if resp.status_code == 200 else []
+        pairs = [m for m in msgs if m.get("role") == "assistant"]
+        report(
+            "conversation history has 2 qa pairs",
+            len(msgs) == 4 and len(pairs) == 2
+            and pairs[0].get("hit") is True and pairs[1].get("hit") is False,
+            resp.text,
+        )
+
+        # ---- 9. 出题（真 LLM）：意图分类 quiz + 试卷可解析 ----
+        resp = client.post(
+            "/chat/ask",
+            json={"question": QUESTION_QUIZ, "group_ids": [group_id], "conversation_id": conv_id},
+            headers=auth,
+        )
+        quiz_ok = resp.status_code == 200
+        quiz_body = resp.json() if quiz_ok else {}
+        generated = None
+        if quiz_ok and quiz_body.get("intent") == "quiz":
+            # answer 是试卷 JSON 文本（quiz_tool 契约）；parse 失败=出题链路坏，必须 FAIL
+            try:
+                generated = json.loads(quiz_body.get("answer") or "")
+            except (json.JSONDecodeError, TypeError):
+                generated = None
+        quiz_ok = quiz_ok and isinstance(generated, dict) and bool(generated.get("questions"))
+        if not report("quiz generation intent=quiz parseable", quiz_ok, resp.text):
+            return finish()
+
+        # ---- 10. 判分（自带固定卷，零生成随机性）：1 对 1 错 → 50 分、记 1 错 ----
+        resp = client.post(
+            "/chat/score",
+            json={
+                "quiz": FIXED_QUIZ,
+                "answers": FIXED_ANSWERS,
+                "sources": [{"file_name": DEMO_DOC_NAME, "page_no": 1}],
+            },
+            headers=auth,
+        )
+        score_body = resp.json() if resp.status_code == 200 else {}
+        if not report(
+            "score fixed quiz = 50, recorded=1",
+            resp.status_code == 200 and score_body.get("score") == 50 and score_body.get("recorded") == 1,
+            resp.text,
+        ):
+            return finish()
+
+        # ---- 11. 错题本：刚才答错的那题已在列表且带教材锚 ----
+        resp = client.get("/quiz/records", headers=auth)
+        records = resp.json() if resp.status_code == 200 else []
+        report(
+            "wrong book has anchored record",
+            len(records) >= 1 and DEMO_DOC_NAME in (records[0].get("ref_file") or ""),
+            resp.text,
+        )
+
+        # ---- 12. 看板对账（M6 验收：跑完问答后数字必须对得上）----
+        # 本脚本共发 3 问（正/负/出题）且都挂会话 → total=3；正例+出题命中、负例兜底
+        resp = client.get("/monitoring/overview", headers=auth)
+        ov = resp.json() if resp.status_code == 200 else {}
+        report(
+            "monitoring qa counters match",
+            resp.status_code == 200
+            and ov.get("questions", {}).get("total") == 3
+            and ov.get("answers", {}).get("hit") == 2
+            and ov.get("answers", {}).get("fallback") == 1,
+            resp.text,
+        )
+        report(
+            "monitoring quiz counters match",
+            ov.get("quiz", {}).get("total") == 2 and ov.get("quiz", {}).get("wrong") == 1,
+            resp.text,
+        )
+        report(
+            "monitoring top_files contains demo doc",
+            any("demo_knowledge" in (x.get("file_name") or "") for x in ov.get("top_files", [])),
             resp.text,
         )
 

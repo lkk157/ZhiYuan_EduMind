@@ -178,6 +178,10 @@ class ApiClient:
         """本人记忆清单（薄弱点/洞察/报告）。"""
         return self._request("GET", "/memory/facts")
 
+    def monitoring_overview(self) -> dict:
+        """数据看板总览（M6）：提问量/近7天趋势、命中率/兜底、高频课件、答题表现、知识库概览。"""
+        return self._request("GET", "/monitoring/overview")
+
     def ask_stream(
         self,
         question: str,

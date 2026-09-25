@@ -85,6 +85,7 @@ else:
         st.Page("app_pages/1_上传管理.py", title="上传管理", icon=":material/upload_file:"),
         st.Page("app_pages/2_智能答疑.py", title="智能答疑", icon=":material/school:"),
         st.Page("app_pages/3_错题与学情.py", title="错题与学情", icon=":material/insights:"),
+        st.Page("app_pages/4_数据看板.py", title="数据看板", icon=":material/dashboard:"),
     ]
     page = st.navigation(pages, position="sidebar")
     # 标题统一在入口处理（官方模式：页面内不再重复 st.title）

@@ -30,7 +30,7 @@ ZhiYuan_EduMind/
 │   ├── db/                   #   数据访问层（MySQL = 事实源）
 │   │   ├── session.py        #     SQLAlchemy engine/session（单测可切 SQLite 内存库）
 │   │   ├── models.py         #     ORM：users/kb_groups/documents/chunk_fingerprints/
-│   │   │                     #           conversations/messages/qa_logs/retrieval_logs/
+│   │   │                     #           conversations/messages（问答日志即 messages）/
 │   │   │                     #           quiz_records/memory_facts
 │   │   └── crud.py           #     增删改查封装（api 不直接写 SQL）
 │   ├── ingest/               #   入库流水线（写路径：慢、可异步、耗显存）：解析→切块→指纹→向量化
@@ -61,7 +61,7 @@ ZhiYuan_EduMind/
 │
 ├── frontend/                 # ★ Streamlit 界面（只做展示交互，业务全走 HTTP → 天然「多端」）
 │   ├── app.py                #   主入口：登录/侧边栏导航/页面路由
-│   ├── pages/                #   上传管理 / 智能答疑 / 题库错题 / 数据看板
+│   ├── app_pages/            #   上传管理 / 智能答疑 / 错题与学情 / 数据看板
 │   ├── services/             #   调 FastAPI 的 HTTP 封装（带 JWT）
 │   └── components/           #   来源卡片、对话气泡、指标卡等复用组件
 │
@@ -103,6 +103,7 @@ ZhiYuan_EduMind/
 > 总原则：**M2 出首个可演示闭环**（答辩信心保障），之后按「Agent→多模态→记忆→看板」扩展。
 > 每阶段固定节奏（CLAUDE.md 强制）：**思路→用户确认→代码→单元测试→git push（打 tag）**。
 > **2026-09-25 M5 完成记录**：吸收「学习周报」与「知识点图谱关联推荐」（后者按产品经理要求做成**动态派生图**：不存边表、上传即入图、语义边用存量向量零模型调用）。
+> **2026-09-25 M6 完成记录**：看板统计**不建**目录树早期预告的 qa_logs/retrieval_logs——messages 表（09-24 会话历史落地）本就是结构化问答日志、回答的 sources 即检索结果落库形态，再建表是双写冗余且历史数据不可见；monitoring 层从既有表现算（零写入、零模型调用），demo_e2e 扩为全流程版（含看板对账断言）。**顺手修复 M4 遗留缺陷**：滑窗历史中 hit=false 兜底轮会把 query 改写带偏（两组对照复现实锤，负例后连续多轮空召回）→ load_window 成对剔除负例轮、先过滤后截窗（详见 M6 过程报告）。
 > 需求覆盖映射：需求1多模态知识库→M2+M3｜需求2溯源RAG→M2+M4｜需求3Agent→M4｜需求4记忆→M4+M5｜需求5个性化→M5｜生产思维（并发显存/鉴权/增量/日志）→M1+M2+M3+M6｜教学特色（随堂测/引导式答疑/学习周报）→M4+M5吸收｜RAG质量包与体验增强包→M4 后插入（见 2026-09-24 排序定稿）。
 
 | 里程碑 | 目标 | 关键产出 | 验收标准 | 主要风险 |
@@ -113,7 +114,7 @@ ZhiYuan_EduMind/
 | **M3 多模态入库（OCR）**（4–5天） | 扫描页/图片/图表公式经 GLM-OCR 转文本入库；**显存互斥方案落地**；上传即同步识别 | ingest/{ocr.py,parsers/image_parser.py}、pipeline 集成、llm.active_models、前端图片上传 | empty_pages 按清单回填成可检索块；图片文件可入库可提问带来源；入库全程 nvidia-smi 无 OOM（记录峰值）；tag `M3-ocr-multimodal` | **模型不可用**→fallback `deepseek-ocr`/`qwen2.5-vl:3b`（见风险预案）；PDF 渲染依赖 pymupdf（纯 pip）；OCR 失败页留 empty_pages 可重传 |
 | **M4 Agent 智能调度与多轮增强**（5–6天）（原 M6+M4 合并）✅ | 意图分类（答疑/出题/总结/计算）→LangGraph 分发工具；多轮滑窗 + query 改写（模糊/术语/对比/指代）；**吸收教学特色**：随堂测=出题工具、引导式答疑=答疑 prompt 开关；新增 /chat/score 判分 | agent/{graph,intent,tools}.py、memory/short_term.py、components/quiz.py | 同会话「出3道题→总结上一节→这道题怎么算」路由正确；连续追问「它呢？」指代正确；非法标签默认答疑单测过；**120 passed；tag `M4-agent`** | 7B 分类不稳→温度0+枚举+few-shot；窗口挤爆 num_ctx→N=6+截断；检索前置保「空召回零调用」硬闸门（过程报告有载） |
 | **M5 长效记忆+个性化**（4–5天）✅ | 记忆提炼与语义召回（双写）；错题解析、知识点关联推荐、题库完善 | memory/long_term.py、api/quiz.py、models 扩表 | 新会话能「记得」用户弱点并调整讲解；user_id 隔离单测过；**185 passed；动态图谱/周报/错题本落地；tag `M5-memory`** | 7B 提炼质量→模板固定字段；隐私→仅本用户可见 |
-| **M6 监控看板+答辩收尾**（3–4天） | 日志完善、Streamlit 看板（提问量/高频知识点/命中率）、README 定稿、演示脚本 | monitoring/*、pages/dashboard.py、demo_e2e 完整版 | 跑 20 条问答看板对账；5 分钟全流程演示不 OOM | 看板慢→加时间范围/索引（体量小） |
+| **M6 监控看板+答辩收尾**（3–4天）✅ | 日志完善、Streamlit 看板（提问量/高频知识点/命中率）、README 定稿、演示脚本 | monitoring/stats.py、api/monitoring.py、app_pages/4_数据看板.py、demo_e2e 完整版 | **191 passed；demo_e2e 17/17 ALL PASS（含看板对账3项）+ README/评估集定稿 + 修复改写污染缺陷；tag `M6-dashboard`** | 看板慢→拉行 Python 聚合已覆盖体量（上万行再改 SQL） |
 
 > 节奏建议：每 3–7 天一个里程碑（纯开发约 5–7 周），完成后空一周回归+打磨演示；在 M2/M3/M4 各安排一次预答辩彩排。每阶段完成后按规范：**单测全绿 → `git push`**，里程碑额外打 tag；过程报告随阶段入库（CLAUDE.md §8）。
 
