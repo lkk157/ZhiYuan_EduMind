@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     top_k_quiz: int = 5
     top_k_summary: int = 7
 
+    # ===== RAG 质量包（混合检索）=====
+    # retrieval_mode: "vector"=纯向量（默认，验收基线）| "hybrid"=BM25+向量 RRF 融合。
+    # 为什么要开关而不是直接替换：答辩要 A/B 对比演示 + 实验表要有基线；
+    # 出问题也能一行回退（README 升级路径同款思路）
+    retrieval_mode: str = "vector"
+    # BM25 准入下限（双闸之一）：向量闸=SCORE_THRESHOLD，BM25 闸=本值。
+    # 量纲是 BM25 分数（与余弦无关），2.0 为保守初值——标定脚本按正负例分布回填
+    bm25_floor: float = 2.0
+
     # ===== 上传限制（产品需求 2026-09-24：单批最多 5 个、总大小 ≤200MB）=====
     # 放配置而非硬编码（CLAUDE.md §5）：答辩演示临时放宽只改 .env，不动代码
     max_upload_files: int = 5

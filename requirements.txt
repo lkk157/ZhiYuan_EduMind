@@ -24,6 +24,10 @@ pymupdf>=1.24
 # ===== M4 Agent =====
 langgraph>=0.2
 
+# ===== RAG 质量包：混合检索（BM25 关键词 + 向量语义，RRF 融合；纯 Python 轻依赖）=====
+jieba>=0.42
+rank_bm25>=0.2.2
+
 # ===== 前端 =====
 streamlit>=1.36
 

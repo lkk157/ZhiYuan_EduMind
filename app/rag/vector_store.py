@@ -50,6 +50,14 @@ class VectorStore(Protocol):
         """按向量检索 top_k 条命中（score=1-余弦距离）。"""
         ...
 
+    def get_all(self) -> list[SearchHit]:
+        """拉取全量块（id/text/metadata，不含向量）——混合检索的 BM25 语料来源。"""
+        ...
+
+    def get_embeddings(self, ids: list[str]) -> dict[str, list[float]]:
+        """按 id 取回存量向量（BM25 独家命中补算余弦分数用）。"""
+        ...
+
     def delete(self, ids: list[str]) -> Any:
         """按向量 id 删除（重传增量入库时清掉被移除/被改动的旧块）。"""
         ...
@@ -168,6 +176,41 @@ class ChromaStore:
                 )
             )
         return hits
+
+    def get_all(self) -> list[SearchHit]:
+        """拉取全量块（含 text/metadata，不含向量）——BM25 语料一次取齐。
+
+        为什么可以全量拉：语料规模 = 文档块数（毕设体量几千条，毫秒级）；
+        score 置 0.0 占位——BM25 路的分数由 BM25 自己算，这里只提供文本。
+        为什么不动 MySQL：块正文只存在于向量库（MySQL 只存指纹），
+        从这里取零表结构变更（质量包的「不加表」承诺）。
+        """
+        count = self._col.count()
+        if count == 0:
+            return []
+        res = self._col.get(include=["documents", "metadatas"])
+        ids = res.get("ids") or []
+        docs = res.get("documents") or []
+        metas = res.get("metadatas") or []
+        return [
+            SearchHit(id=i, text=d or "", score=0.0, metadata=dict(m or {}))
+            for i, d, m in zip(ids, docs, metas)
+        ]
+
+    def get_embeddings(self, ids: list[str]) -> dict[str, list[float]]:
+        """按 id 取回存量向量 → {id: vector}（缺失的 id 不出现在结果里）。
+
+        用途唯一：BM25 独家捞回的块没有查询时的余弦分，取其存量向量
+        与查询向量现算余弦——保证 sources 里的「相似度」字段对两类命中同口径。
+        """
+        if not ids:
+            return {}
+        res = self._col.get(ids=list(ids), include=["embeddings"])
+        out: dict[str, list[float]] = {}
+        for id_, emb in zip(res.get("ids") or [], res.get("embeddings") or []):
+            if emb is not None:
+                out[id_] = list(emb)
+        return out
 
     def delete(self, ids: list[str]) -> None:
         """按向量 id 删除旧块（增量入库时清掉被移除/被改动的块）。"""

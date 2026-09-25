@@ -1,0 +1,32 @@
+[
+  {
+    "question": "梯度下降的学习率过大会导致什么后果？",
+    "expect_hit": true,
+    "note": "正例1：改写成与你课件内容对应的提问（务必贴你实际上传的资料）"
+  },
+  {
+    "question": "什么是数据结构的三要素？",
+    "expect_hit": true,
+    "note": "正例2：贴课件知识点"
+  },
+  {
+    "question": "算法的五个重要特性是什么？",
+    "expect_hit": true,
+    "note": "正例3：贴课件知识点"
+  },
+  {
+    "question": "番茄炒蛋应该放多少克盐？",
+    "expect_hit": false,
+    "note": "负例1：与课件完全无关，必须兜底"
+  },
+  {
+    "question": "2027年世界杯在哪个国家举办？",
+    "expect_hit": false,
+    "note": "负例2：时事类，必须兜底"
+  },
+  {
+    "question": "如何给猫剪指甲不被抓伤？",
+    "expect_hit": false,
+    "note": "负例3：生活类，必须兜底"
+  }
+]
