@@ -105,6 +105,7 @@ async def qa_tool(
     *,
     guide_mode: bool = False,
     on_delta=None,
+    background: list[str] | None = None,
 ) -> dict:
     """命中资料后的标准问答：生成 → 净化伪来源 → 资料不足闸门 → 强制拼真来源。
 
@@ -113,7 +114,7 @@ async def qa_tool(
     on_delta：流式回调（体验增强包）——**闸门/净化在流完后统一做**，
     流出去的是原始 token、返回的 done 是净化结果，两边一致性由前端以 done 为准。
     """
-    system, prompt = build_qa_prompt(question, chunks, guide=guide_mode)
+    system, prompt = build_qa_prompt(question, chunks, guide=guide_mode, background=background)
     raw = await _generate(
         system=system,
         prompt=prompt,
@@ -181,7 +182,9 @@ def parse_quiz(raw: str) -> dict | None:
     return obj
 
 
-async def quiz_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
+async def quiz_tool(
+    question: str, chunks: list[RetrievedChunk], *, background: list[str] | None = None
+) -> dict:
     """出题/随堂测：依据命中资料生成试题 JSON（answer 字段=JSON 字符串，不拼【来源】）。
 
     为什么不 append_sources 到 answer：answer 本体就是 JSON 文本，
@@ -194,7 +197,7 @@ async def quiz_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
     top_k_quiz 块——材料越杂题目越散（2026-09-25 反馈的根因之一）。
     """
     chunks = chunks[: settings.top_k_quiz]
-    system, prompt = build_quiz_prompt(question, chunks)
+    system, prompt = build_quiz_prompt(question, chunks, background=background)
     raw = await gateway.generate(
         model=settings.llm_model,
         prompt=prompt,
@@ -367,7 +370,9 @@ async def calc_tool(question: str, chunks: list[RetrievedChunk] | None = None) -
 async def score_quiz(questions: list[dict], answers: list[str]) -> dict:
     """判分：单选代码层先判（确定性优先），简答交 LLM 按要点给分。
 
-    返回 {"score": int, "comment": str}；LLM 输出解析失败抛 RuntimeError
+    返回 {"score": int, "comment": str, "details": [{"correct": bool}...]}——
+    details 与 questions **原顺序逐题对齐**（M5 错题本要按题落库，
+    只有总分记不了「哪道错」）；LLM 输出解析失败抛 RuntimeError
     由接口层翻译成 502 人话（判分失败可重试，比给个假分数诚实）。
     """
     # 第一层：单选题精确比对——能确定的绝不交给模型不确定性
@@ -388,7 +393,11 @@ async def score_quiz(questions: list[dict], answers: list[str]) -> dict:
     if not short_idx:
         # 全是单选：分数已确定，不产生任何 LLM 调用（零成本路径）
         score = round(sum(final_scores.values()) / len(questions)) if questions else 0
-        return {"score": score, "comment": "全部为单选题，已自动判分。"}
+        return {
+            "score": score,
+            "comment": "全部为单选题，已自动判分。",
+            "details": [{"correct": final_scores.get(i, 0) >= 100} for i in range(len(questions))],
+        }
 
     # 第二层：简答题（或混合卷）交 LLM——只送简答相关题，减少干扰
     sub_questions = [questions[i] for i in short_idx]
@@ -409,10 +418,26 @@ async def score_quiz(questions: list[dict], answers: list[str]) -> dict:
         comment = str(obj.get("comment", "")).strip()
         if not 0 <= llm_score <= 100:
             raise ValueError("分数越界")
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        # 逐题对错：必须是与简答题等长的布尔数组（错题本按题落库的数据源）
+        correct_flags = obj.get("correct")
+        if (
+            not isinstance(correct_flags, list)
+            or len(correct_flags) != len(short_idx)
+            or not all(isinstance(c, bool) for c in correct_flags)
+        ):
+            raise ValueError("correct 数组缺失或长度不符")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
         logger.warning("判分 JSON 解析失败: %s raw=%.200s", e, raw)
         raise RuntimeError("判分失败") from e
     # 总分 = 已判单选平均 + 简答 LLM 分平均（各题等权）
     total = sum(final_scores.values()) + llm_score * len(short_idx)
     score = round(total / len(questions))
-    return {"score": score, "comment": comment or "已判分。"}
+    # 按原顺序拼 details（单选用代码结果，简答用 LLM 逐题标志）
+    details: list[dict] = []
+    short_iter = iter(correct_flags)
+    for i in range(len(questions)):
+        if i in final_scores:
+            details.append({"correct": final_scores[i] >= 100})
+        else:
+            details.append({"correct": bool(next(short_iter))})
+    return {"score": score, "comment": comment or "已判分。", "details": details}

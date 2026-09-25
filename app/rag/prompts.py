@@ -74,7 +74,11 @@ _SOURCE_PATTERN = re.compile(r"【来源[^】]*】")
 
 
 def build_qa_prompt(
-    question: str, chunks: Sequence["RetrievedChunk"], *, guide: bool = False
+    question: str,
+    chunks: Sequence["RetrievedChunk"],
+    *,
+    guide: bool = False,
+    background: Sequence[str] | None = None,
 ) -> tuple[str, str]:
     """把问题与召回资料编排成 (system, prompt) 两段提示词。
 
@@ -102,6 +106,15 @@ def build_qa_prompt(
         "自己写的来源一律会被删除；\n"
         "4. 使用与提问相同的语言回答（默认中文），面向学生，条理清晰。"
     )
+    if background:
+        # 学情背景（M5 个性化）：只用于调整讲解详略与切入角度——
+        # 明令禁止复述，否则答案会变成「你上次错了哦…」的尬聊（产品红线）
+        bullets = "\n".join(f"- {line}" for line in background)
+        system += (
+            "\n【学情背景】以下是对此前学习情况的了解，仅供调整讲解方式：\n"
+            f"{bullets}\n"
+            "禁止在回答中复述或提及这些背景（不许说「你上次错了」之类），聚焦当前问题本身。"
+        )
     if guide:
         # 追加而非替换：铁律 1-4 原样保留，引导式只是「怎么答」的风格开关
         system += (
@@ -169,7 +182,12 @@ _QUIZ_SCHEMA = (
 )
 
 
-def build_quiz_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tuple[str, str]:
+def build_quiz_prompt(
+    question: str,
+    chunks: Sequence["RetrievedChunk"],
+    *,
+    background: Sequence[str] | None = None,
+) -> tuple[str, str]:
     """出题任务提示词：依据资料生成结构化试题 JSON（M4 出题/随堂测工具用）。
 
     为什么强制 JSON 输出而不是自然语言：试题要渲染成交互卡片、要判分，
@@ -194,6 +212,15 @@ def build_quiz_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tupl
         '并说明其时间复杂度。","answer":"gcd(a,b)=gcd(b,a%b)，直到 b 为 0 返回 a；'
         '时间复杂度 O(log min(a,b))","explanation":"辗转相除法基于余数递降，每步规模至少减半。"}'
     )
+    if background:
+        # 学情背景（M5）：出题优先照顾薄弱点——「因材施教」最直白的落点；
+        # 同样禁止在题面里点破（不许出「你上次错的题」这种话术）
+        bullets = "\n".join(f"- {line}" for line in background)
+        system += (
+            "\n【学情背景】优先围绕以下薄弱点选材出题（仍必须依据参考资料，不得编造）：\n"
+            f"{bullets}\n"
+            "禁止在题面或解析中提及学生的过往错误记录。"
+        )
     blocks: list[str] = []
     for n, chunk in enumerate(chunks, start=1):
         blocks.append(f"[{n}] (文件:{chunk.file_name}, 第{chunk.page_no}页)\n{chunk.text}")
@@ -207,18 +234,44 @@ def build_quiz_prompt(question: str, chunks: Sequence["RetrievedChunk"]) -> tupl
     return system, prompt
 
 
+def build_report_prompt(materials: str) -> tuple[str, str]:
+    """学情周报提示词（M5）：对话+答题素材 → {"report": markdown, "weak_points": [...]}。
+
+    为什么强制 JSON 而不是直接写报告：报告正文与薄弱点清单要分开消费——
+    正文 kind=report 入库只做展示，薄弱点 kind=weak_point 才进答疑注入池；
+    混在一篇 markdown 里就没法结构化双写（解析失败统一走 502，不给假报告）。
+    """
+    system = (
+        "你是「知源」的学业分析老师。根据给出的近期学习记录输出一个 JSON 对象：\n"
+        '{"report": "...markdown格式的周报...", "weak_points": ["薄弱点1", "薄弱点2"]}\n'
+        "要求：\n"
+        "1. report 用 markdown，包含「本周表现」「薄弱知识点」「复习建议」三节，"
+        "面向学生、具体、不超过 500 字；\n"
+        "2. weak_points 是 1~6 条简短陈述句（每条 ≤40 字），点名具体知识点而非泛泛而谈；\n"
+        "3. 只依据素材下结论，禁止编造素材里没有的学习情况；\n"
+        "4. 只输出这个 JSON 对象，不要任何解释或代码块标记。"
+    )
+    prompt = f"近期学习记录：\n\n{materials}\n\nJSON："
+    return system, prompt
+
+
 def build_score_prompt(questions: list[dict], answers: list[str]) -> tuple[str, str]:
-    """判分提示词：学生作答 vs 标准答案 → {"score":0-100,"comment":"..."}。
+    """判分提示词：学生作答 vs 标准答案 → {"score","comment","correct":[每题对错]}。
 
     为什么判分也让 LLM 做而不是字符串比对：简答题的「意思对了但措辞不同」
     是常态（教育场景的正确答案本就开放），机械比对会把对的判成错的；
     单选题 answer 精确匹配在代码层先做（见 score 端点），LLM 只判简答——
     能确定的绝不确定性，是判分设计的第一原则。
+
+    correct 数组（M5 新增）：与传入的简答题顺序一一对应——错题本要逐题落库，
+    只有总分没有逐题对错就记不了「哪道错」。
     """
     system = (
         "你是阅卷老师。对照标准答案给学生的作答打分，只输出一个 JSON 对象："
-        '{"score":0到100的整数,"comment":"不超过50字的中文评语"}，'
-        "不要输出任何其他内容。单选题答对得满分、答错 0 分；简答题按要点给分。"
+        '{"score":0到100的整数,"comment":"不超过50字的中文评语",'
+        '"correct":[true或false,与简答题顺序一一对应]}，'
+        "不要输出任何其他内容。单选题不在此判（系统已自动判）；简答题按要点给分，"
+        "要点齐全为 true，否则 false。"
     )
     lines = []
     # 标准答案从题目 dict 里取（q["answer"]），序列只配对「题面 ↔ 学生作答」两个维度

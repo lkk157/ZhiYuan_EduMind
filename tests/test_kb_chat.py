@@ -437,3 +437,38 @@ def test_cross_user_access_is_404(env):
 
     # 对照：A 自己访问正常
     assert c.get(f"/kb/groups/{gid}/documents", headers=_auth(env["token_a"])).status_code == 200
+
+
+# ===== M5 个性化注入 =====
+
+
+def test_ask_injects_memory_background(env, monkeypatch):
+    """学情背景注入：无记忆不带段落；有记忆带段落+护栏措辞（禁复述）。"""
+    from app.db import crud as _crud
+
+    c = env["client"]
+    gid = c.post("/kb/groups", json={"name": "课件"}, headers=_auth(env["token_a"])).json()["id"]
+    c.post(f"/kb/groups/{gid}/documents", files={"file": ("讲义.docx", _docx_bytes([DOC_TEXT]))}, headers=_auth(env["token_a"]))
+
+    stub = _stub_agent(monkeypatch, "学习率过大会震荡。")
+    # 记忆索引打桩（query 恒空——本用例验的是「注入与否」，语义合并逻辑归 test_long_term）
+    monkeypatch.setattr(
+        "app.memory.long_term.memory_store_for",
+        lambda uid: type("S", (), {"query": lambda self, v, k: []})(),
+    )
+
+    # 无记忆：不带学情段
+    r = c.post("/chat/ask", json={"question": "学习率过大会怎样", "group_ids": [gid]}, headers=_auth(env["token_a"]))
+    assert r.status_code == 200
+    assert "学情背景" not in stub.kwargs.get("system", "")
+
+    # 造一条薄弱记忆 → 再问：段落出现且含事实内容与护栏
+    _crud.create_memory_fact(
+        env["db"], user_id=env["user_a"].id, kind="weak_point", content="学生不熟单链表插入"
+    )
+    r = c.post("/chat/ask", json={"question": "学习率过大会怎样", "group_ids": [gid]}, headers=_auth(env["token_a"]))
+    assert r.status_code == 200
+    system = stub.kwargs.get("system", "")
+    assert "学情背景" in system
+    assert "学生不熟单链表插入" in system
+    assert "禁止在回答中复述" in system  # 护栏：不许尬聊复述

@@ -264,6 +264,77 @@ class Message(Base):
         )
 
 
+class MemoryFact(Base):
+    """长效记忆事实表（M5）：错题直出的结构化弱点 + 周报 LLM 提炼的洞察与报告。
+
+    为什么 kind 要分类：三类的消费方式不同——weak_point 进答疑 prompt 的学情背景、
+    report 是用户直接读的周报、insight 是提炼的通用结论；混在一起读侧还得猜语义。
+
+    为什么 ref_file 可空：错题型记忆带章节锚点（供知识点图谱关联推荐回溯），
+    报告型记忆没有单一锚点，空串表示无锚——不是所有事实都挂得上章节。
+    双写的另一半（向量索引）在 Chroma u{id}mem collection，本表是事实源。
+    """
+
+    __tablename__ = "memory_facts"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_memory_user"),
+        index=True,
+    )
+    # weak_point / insight / report（见 long_term.py 的生成端，禁止发明新值）
+    kind: Mapped[str] = mapped_column(String(32))
+    content: Mapped[str] = mapped_column(Text)
+    # 章节锚点（文件名），无锚为空串——知识点图谱推荐的回溯依据
+    ref_file: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<MemoryFact id={self.id} user_id={self.user_id} kind={self.kind!r}>"
+
+
+class QuizRecord(Base):
+    """错题记录表（M5）：判分时答错的题各一行——错题本的数据源。
+
+    为什么判分时就落库而不是周报时再挖：对错与解析在判分瞬间全是现成结构
+    （零 LLM 即可记录），攒到以后再挖反而丢上下文；错题本页要「即时可见」。
+
+    ref_file/ref_page：本题所依据的课件锚点（来自回答的 sources，前端随判分一并提交）——
+    知识点图谱的「错题 → 章节 → 关联推荐」链路全靠它起步，无锚则推荐退化为全局结构边。
+    """
+
+    __tablename__ = "quiz_records"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_quiz_records_user"),
+        index=True,
+    )
+    question: Mapped[str] = mapped_column(Text)
+    # choice / short（与试题 JSON 契约一致）
+    question_type: Mapped[str] = mapped_column(String(16), default="choice")
+    user_answer: Mapped[str] = mapped_column(Text, default="")
+    correct_answer: Mapped[str] = mapped_column(Text, default="")
+    explanation: Mapped[str] = mapped_column(Text, default="")
+    is_correct: Mapped[bool] = mapped_column(Boolean, default=False)
+    ref_file: Mapped[str] = mapped_column(String(255), default="")
+    ref_page: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<QuizRecord id={self.id} user_id={self.user_id} correct={self.is_correct}>"
+
+
 def join_empty_pages(pages: list[int]) -> str:
     """把无文本层页码列表编码成逗号拼接字符串（如 [2, 5] -> "2,5"）。
 
@@ -291,6 +362,8 @@ __all__ = [
     "ChunkFingerprint",
     "Conversation",
     "Message",
+    "MemoryFact",
+    "QuizRecord",
     "join_empty_pages",
     "split_empty_pages",
 ]

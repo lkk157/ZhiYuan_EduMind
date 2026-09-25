@@ -51,6 +51,9 @@ class AgentState(TypedDict, total=False):
     # 流式回调（体验增强包）：可选的同步 callable(str)->None，qa/summary 逐 token 回吐；
     # 出题/计算不接（JSON 结构要整包解析）。None = 非流式（既有路径，单测全走这条）
     on_delta: Any
+    # 学情背景（M5 个性化）：long_term.recall_memories 的产出，注入 qa/quiz 的 prompt；
+    # 空列表/缺失=无记忆（默认路径），既有测试零影响
+    mem_context: list[str]
     # 范围过滤（agent/scope.py 在接口层解析后传入，图内只负责透传给检索）
     page_range: tuple[int, int] | None
     file_name: str | None
@@ -112,11 +115,14 @@ async def _node_qa(state: AgentState) -> dict:
         state["chunks"],
         guide_mode=bool(state.get("guide_mode")),
         on_delta=state.get("on_delta"),
+        background=state.get("mem_context"),
     )
 
 
 async def _node_quiz(state: AgentState) -> dict:
-    return await tools.quiz_tool(state["question"], state["chunks"])
+    return await tools.quiz_tool(
+        state["question"], state["chunks"], background=state.get("mem_context")
+    )
 
 
 async def _node_summary(state: AgentState) -> dict:
@@ -194,6 +200,7 @@ async def run_agent(
     file_name: str | None = None,
     scope_note: str | None = None,
     on_delta: Any = None,
+    mem_context: list[str] | None = None,
 ) -> dict[str, Any]:
     """跑一轮 Agent，返回 {answer, sources, hit, intent, scope_note} 契约。
 
@@ -213,6 +220,7 @@ async def run_agent(
             "file_name": file_name,
             "scope_note": scope_note,
             "on_delta": on_delta,
+            "mem_context": mem_context or [],
         }
     )
     return {

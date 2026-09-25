@@ -148,10 +148,35 @@ class ApiClient:
             timeout=_LONG_TIMEOUT,  # 7B 生成可能到分钟级（含模型冷加载）
         )
 
-    def score_quiz(self, quiz: dict, answers: list[str]) -> dict:
-        """试题判分：quiz=出题返回的试题 JSON 对象，answers=按题序作答；
-        返回 {score, comment}。单选全卷后端零 LLM 直接算，简答走模型按要点给分。"""
-        return self._request("POST", "/chat/score", json={"quiz": quiz, "answers": answers})
+    def score_quiz(self, quiz: dict, answers: list[str], sources: list[dict] | None = None) -> dict:
+        """试题判分：quiz=试题 JSON，answers=按题序作答，sources=本题来源（教材锚，M5）；
+        返回 {score, comment, recorded}——recorded=本次记入错题本的错题数。"""
+        return self._request(
+            "POST",
+            "/chat/score",
+            json={"quiz": quiz, "answers": answers, "sources": sources or []},
+        )
+
+    # ---------- 错题与学情（M5）----------
+
+    def quiz_records(self) -> list:
+        """本人错题列表（含知识点图谱关联推荐 related）。"""
+        return self._request("GET", "/quiz/records")
+
+    def delete_quiz_record(self, record_id: int) -> dict:
+        return self._request("DELETE", f"/quiz/records/{record_id}")
+
+    def generate_report(self) -> dict:
+        """生成学习周报（服务端 LLM 提炼，读超时放宽到 300s）。"""
+        return self._request("POST", "/memory/report", timeout=_LONG_TIMEOUT)
+
+    def latest_report(self) -> dict:
+        """最近一次周报；从未生成返回 {report: None}。"""
+        return self._request("GET", "/memory/report")
+
+    def memory_facts(self) -> list:
+        """本人记忆清单（薄弱点/洞察/报告）。"""
+        return self._request("GET", "/memory/facts")
 
     def ask_stream(
         self,

@@ -155,7 +155,12 @@ for idx, msg in enumerate(history):
             # 试题消息 → 渲染成交互卡片（活体与回看同一渲染路径，key 按序号隔离）
             quiz = try_parse_quiz(msg.get("content", ""))
             if quiz:
-                render_quiz_card(quiz, key_prefix=f"quiz_{idx}", client=client)
+                render_quiz_card(
+                    quiz,
+                    key_prefix=f"quiz_{idx}",
+                    client=client,
+                    sources=msg.get("sources") or [],
+                )
                 render_sources(msg.get("sources") or [])
                 continue
             st.markdown(msg["content"])

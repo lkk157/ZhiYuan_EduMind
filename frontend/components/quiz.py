@@ -41,8 +41,12 @@ def render_quiz_card(
     *,
     key_prefix: str,
     client,
+    sources: list[dict] | None = None,
 ) -> None:
     """渲染一张可作答的试题卡（key_prefix 隔离多张卡的 widget 状态）。
+
+    sources（M5）：本题的来源卡片原样透传给判分接口——错题的教材锚点，
+    知识点图谱靠它定位「错在哪个章节」；无来源时锚点为空（推荐退化）。
 
     判分结果存 session_state[key_prefix_result]：rerun 后仍展示，
     直到下一次点「重新判分」覆盖。
@@ -96,7 +100,7 @@ def render_quiz_card(
     with col_btn:
         if st.button("提交判分", key=f"{key_prefix}_submit", icon=":material/check:"):
             try:
-                result = client.score_quiz(quiz, answers)
+                result = client.score_quiz(quiz, answers, sources=sources)
                 st.session_state[f"{key_prefix}_result"] = result
             except ApiError as e:
                 st.error(e.message)
@@ -106,6 +110,10 @@ def render_quiz_card(
             score = result.get("score")
             comment = result.get("comment", "")
             st.markdown(f"**:material/grade: {score} 分** — {comment}")
+            recorded = result.get("recorded") or 0
+            if recorded:
+                # 错题即时反馈（M5）：让用户知道这几道已进错题本（去向明确）
+                st.caption(f":material/bookmark_add: 本次 {recorded} 道错题已记入错题本")
 
     # 标准答案折叠展示：作答判分后再看，避免「对着答案做题」
     with st.expander("查看标准答案与解析"):

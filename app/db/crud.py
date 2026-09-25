@@ -21,7 +21,9 @@ from app.db.models import (
     Conversation,
     Document,
     KbGroup,
+    MemoryFact,
     Message,
+    QuizRecord,
     User,
     join_empty_pages,
 )
@@ -421,3 +423,101 @@ def delete_conversation(db: Session, *, user_id: int, conversation_id: int) -> b
     db.delete(conversation)
     db.commit()
     return True
+
+
+# ===== 错题记录（M5）=====
+
+
+def create_quiz_record(
+    db: Session,
+    *,
+    user_id: int,
+    question: str,
+    question_type: str,
+    user_answer: str,
+    correct_answer: str,
+    explanation: str,
+    is_correct: bool,
+    ref_file: str = "",
+    ref_page: int = 0,
+) -> QuizRecord:
+    """落一条错题/答题记录（判分时即时写，零 LLM）。"""
+    record = QuizRecord(
+        user_id=user_id,
+        question=question,
+        question_type=question_type,
+        user_answer=user_answer,
+        correct_answer=correct_answer,
+        explanation=explanation,
+        is_correct=is_correct,
+        ref_file=ref_file,
+        ref_page=ref_page,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def list_quiz_records(
+    db: Session, *, user_id: int, limit: int = 50, wrong_only: bool = True
+) -> list[QuizRecord]:
+    """本人最近答题记录，按时间倒序。
+
+    wrong_only=True（默认）=错题本口径只收错的；
+    wrong_only=False=含答对的——周报要看正确率与全貌，不能只看错题盲区。
+    """
+    stmt = select(QuizRecord).where(QuizRecord.user_id == user_id)
+    if wrong_only:
+        stmt = stmt.where(QuizRecord.is_correct.is_(False))
+    rows = db.execute(stmt.order_by(QuizRecord.id.desc()).limit(limit)).scalars()
+    return list(rows)
+
+
+def delete_quiz_record(db: Session, *, user_id: int, record_id: int) -> bool:
+    """删一条错题（带 user_id 过滤，非本人返回 False → api 层转 404）。"""
+    record = db.execute(
+        select(QuizRecord).where(QuizRecord.id == record_id, QuizRecord.user_id == user_id)
+    ).scalar_one_or_none()
+    if record is None:
+        return False
+    db.delete(record)
+    db.commit()
+    return True
+
+
+# ===== 长效记忆（M5）=====
+
+
+def create_memory_fact(
+    db: Session, *, user_id: int, kind: str, content: str, ref_file: str = ""
+) -> MemoryFact:
+    """写一条记忆事实（MySQL=事实源；向量双写由调用方 best-effort 补）。"""
+    fact = MemoryFact(user_id=user_id, kind=kind, content=content, ref_file=ref_file)
+    db.add(fact)
+    db.commit()
+    db.refresh(fact)
+    return fact
+
+
+def list_memory_facts(
+    db: Session, *, user_id: int, limit: int = 20, kinds: tuple[str, ...] | None = None
+) -> list[MemoryFact]:
+    """本人记忆清单（可按 kind 过滤），时间倒序（最近的排前——越近越相关）。"""
+    stmt = select(MemoryFact).where(MemoryFact.user_id == user_id)
+    if kinds:
+        stmt = stmt.where(MemoryFact.kind.in_(kinds))
+    rows = db.execute(
+        stmt.order_by(MemoryFact.id.desc()).limit(limit)
+    ).scalars()
+    return list(rows)
+
+
+def latest_memory_fact(db: Session, *, user_id: int, kind: str) -> MemoryFact | None:
+    """取某类最新一条（GET 最近一次学情报告用）。"""
+    return db.execute(
+        select(MemoryFact)
+        .where(MemoryFact.user_id == user_id, MemoryFact.kind == kind)
+        .order_by(MemoryFact.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()

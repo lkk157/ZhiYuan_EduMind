@@ -236,3 +236,14 @@ def store_for(user_id: int, group_id: int, client: Any = None) -> ChromaStore:
     肉眼可审计（答辩演示时一眼看出这是谁的哪个分组），也杜绝跨用户误用同名集合。
     """
     return ChromaStore(collection=f"u{user_id}g{group_id}", client=client)
+
+
+def memory_store_for(user_id: int, client: Any = None) -> ChromaStore:
+    """取「用户长期记忆」向量库（collection 名 u{user_id}mem，M5 双写的索引侧）。
+
+    为什么与知识库 collection 分开：记忆与课件块的生命周期、消费路径完全不同
+    （记忆随周报批量重写、课件随增量入库细粒度更新），混在一个 collection 里
+    过滤条件会越写越绕；分离后删除知识分组 drop collection 也绝不会误伤记忆。
+    命名沿用 u{id} 前缀族，权限边界口径一致。
+    """
+    return ChromaStore(collection=f"u{user_id}mem", client=client)

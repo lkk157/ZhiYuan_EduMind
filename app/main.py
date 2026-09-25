@@ -13,6 +13,8 @@ from app.api.auth import get_current_user
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.kb import router as kb_router
+from app.api.memory import router as memory_router
+from app.api.quiz import router as quiz_router
 from app.core.exceptions import install_error_handlers
 from app.core.llm import gateway
 from app.db.models import User
@@ -33,6 +35,9 @@ app.include_router(auth_router)
 app.include_router(kb_router)
 # 挂问答路由：/chat/ask（M2 接口层）
 app.include_router(chat_router)
+# 挂错题与记忆路由（M5）：/quiz/records、/memory/report 等
+app.include_router(quiz_router)
+app.include_router(memory_router)
 
 
 @app.on_event("startup")

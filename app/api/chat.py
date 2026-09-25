@@ -28,6 +28,7 @@ from app.agent.scope import resolve_scope
 from app.agent.tools import score_quiz
 from app.api.auth import get_current_user
 from app.core.exceptions import AppError, NotFoundError, UpstreamError
+from app.memory.long_term import KIND_WEAK, make_weak_fact, recall_memories, write_fact
 from app.memory.short_term import load_window
 from app.db import crud
 from app.db.models import User
@@ -201,6 +202,10 @@ async def ask(
     # 2) 滑窗读历史（仅会话问答有历史；无历史时后续改写零模型调用）
     history = load_window(db, user_id=user.id, conversation_id=body.conversation_id)
 
+    # 2.3) 长效记忆召回（M5 个性化）：无记忆快路零开销；语义段失败自动降级最近条——
+    #      注入是增强，绝不允许它反过来让提问失败（见 long_term.recall_memories）
+    mem_context = await recall_memories(db, user_id=user.id, question=body.question)
+
     # 2.5) 范围解析（「第X-Y页」「第N章」→ 检索过滤条件；无范围词时零开销返回 None）。
     #     放接口层是因为它要读 DB（文档文件路径）——图内拿不到会话外的事实源。
     scope, scope_note = resolve_scope(
@@ -222,6 +227,7 @@ async def ask(
                 page_range=page_range,
                 scope_file=scope_file,
                 scope_note=scope_note,
+                mem_context=mem_context,
             ),
             media_type="text/event-stream",
         )
@@ -236,6 +242,7 @@ async def ask(
         page_range=page_range,
         file_name=scope_file,
         scope_note=scope_note,
+        mem_context=mem_context,
     )
     _persist_result(db, conversation, body, result)
     return {**result, "conversation_id": body.conversation_id}
@@ -272,6 +279,7 @@ async def _ask_sse(
     page_range,
     scope_file,
     scope_note,
+    mem_context: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """SSE 问答流：后台跑 Agent，token 经队列回吐成 delta 事件，收尾发 done/error。
 
@@ -299,6 +307,7 @@ async def _ask_sse(
                 page_range=page_range,
                 file_name=scope_file,
                 scope_note=scope_note,
+                mem_context=mem_context,
                 # 同步回调直塞队列：put_nowait 非阻塞，不卡生成循环
                 on_delta=lambda s: queue.put_nowait(("delta", s)),
             )
@@ -336,28 +345,68 @@ async def _ask_sse(
 
 
 class ScoreRequest(BaseModel):
-    """判分入参：quiz=出题工具返回的试题 JSON 对象，answers=按题序的学生作答文本。"""
+    """判分入参：quiz=出题工具返回的试题 JSON 对象，answers=按题序的学生作答文本。
+
+    sources（M5）：本次试题的来源卡片（前端随判分一并提交）——错题的教材锚点，
+    知识点图谱「错题→章节→关联推荐」链路的起点；缺省无锚则推荐退化为全局结构边。
+    """
 
     quiz: dict
     answers: list[str]
+    sources: list[dict] = []
 
 
 @router.post("/score")
 async def score(
     body: ScoreRequest,
     user: User = Depends(get_current_user),
+    db=Depends(get_db),
 ):
     """试题判分：单选代码层精确判、简答 LLM 按要点判（见 tools.score_quiz）。
 
-    判分不落库：M4 阶段它是「会话内即时反馈」，错题正式归档属 M5 quiz_records 表。
+    M5 起判分即落库：**全部作答**写 quiz_records（错题本按 is_correct 过滤，
+    周报要含答对的算正确率）；**答错的**另生成一条零 LLM 的薄弱记忆（双写）。
+    教材锚取 sources[0]（本次试题的首要来源）；返回 recorded=错题数（前端提示用）。
     单选全卷零 LLM 调用（能确定的绝不交给模型）；简答解析失败报 502 人话可重试，
-    宁可报错也不返回假分数。
+    宁可报错也不返回假分数——解析失败时不落库（没判明白就不记录，防脏数据）。
     """
     questions = body.quiz.get("questions") if isinstance(body.quiz, dict) else None
     if not isinstance(questions, list) or not questions:
         raise AppError("试题格式不正确", code=400)
     try:
-        return await score_quiz(questions, body.answers)
+        result = await score_quiz(questions, body.answers)
     except RuntimeError as e:
         # LLM 判分输出解析失败：翻译成统一出口的人话 502（前端 ApiError 直接透出）
         raise UpstreamError("判分失败，请重试") from e
+
+    # 教材锚（图谱链路起点）：sources[0] 优先，无来源则无锚（推荐退化为全局结构边）
+    anchor = body.sources[0] if body.sources else {}
+    ref_file = str(anchor.get("file_name", "") or "")
+    ref_page = int(anchor.get("page_no", 0) or 0)
+    recorded = 0
+    for i, detail in enumerate(result.get("details", [])):
+        q = questions[i]
+        answers_i = body.answers[i] if i < len(body.answers) else ""
+        crud.create_quiz_record(
+            db,
+            user_id=user.id,
+            question=str(q.get("question", "")),
+            question_type=str(q.get("type", "choice")),
+            user_answer=str(answers_i),
+            correct_answer=str(q.get("answer", "")),
+            explanation=str(q.get("explanation", "")),
+            is_correct=bool(detail["correct"]),
+            ref_file=ref_file,
+            ref_page=ref_page,
+        )
+        if not detail["correct"]:
+            recorded += 1
+            # 薄弱记忆零 LLM 模板生成 + 双写（MySQL 先行，索引 best-effort）
+            await write_fact(
+                db,
+                user_id=user.id,
+                kind=KIND_WEAK,
+                content=make_weak_fact(str(q.get("question", "")), ref_file),
+                ref_file=ref_file,
+            )
+    return {"score": result["score"], "comment": result["comment"], "recorded": recorded}

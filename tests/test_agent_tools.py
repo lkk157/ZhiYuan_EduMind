@@ -192,8 +192,11 @@ async def test_score_all_choice_zero_llm(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_score_mixed_weights_llm_short_answer(monkeypatch):
-    """混合卷：单选代码判 + 简答 LLM 判，总分等权合成。"""
-    monkeypatch.setattr("app.agent.tools.gateway", _StubGateway('{"score":80,"comment":"要点基本齐全"}'))
+    """混合卷：单选代码判 + 简答 LLM 判，总分等权合成；details 与题目原序逐题对齐（M5 错题本数据源）。"""
+    monkeypatch.setattr(
+        "app.agent.tools.gateway",
+        _StubGateway('{"score":80,"comment":"要点基本齐全","correct":[true]}'),
+    )
     questions = [
         {"type": "choice", "question": "Q1", "options": ["A", "B"], "answer": "A"},
         {"type": "short", "question": "Q2", "answer": "要点ABC"},
@@ -201,6 +204,7 @@ async def test_score_mixed_weights_llm_short_answer(monkeypatch):
     out = await tools.score_quiz(questions, ["A", "我的作答"])
     assert out["score"] == 90  # (100 + 80) / 2
     assert out["comment"] == "要点基本齐全"
+    assert out["details"] == [{"correct": True}, {"correct": True}]  # 单选对 + 简答对
 
 
 @pytest.mark.asyncio
