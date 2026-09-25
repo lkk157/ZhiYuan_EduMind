@@ -82,6 +82,7 @@ async def retrieve(
             question,
             vector,
             store_map,
+            group_ids=group_ids,
             k=k,
             threshold=min_score,
             page_range=page_range,
@@ -141,6 +142,7 @@ def _retrieve_hybrid(
     vector: list[float],
     store_map: dict,
     *,
+    group_ids: list[int],
     k: int,
     threshold: float,
     page_range: tuple[int, int] | None,
@@ -159,6 +161,12 @@ def _retrieve_hybrid(
 
     limit = k * hybrid._CANDIDATE_MULTIPLIER
 
+    # ★ 权限边界：只许遍历 group_ids 与 store_map 的交集——group_ids 才是授权权威，
+    # store_map 可能比它宽（单测注入 superset、或未来调用方传宽）。
+    # 向量路原本按 group_ids 循环天然安全，hybrid 第一版按 store_map 全键循环，
+    # 被 test_group_isolation 当场抓住（跨组捞语料=越权检索），已改为交集遍历。
+    active_stores = {gid: store_map[gid] for gid in group_ids if gid in store_map}
+
     texts: dict[str, str] = {}
     metas: dict[str, dict] = {}
     group_of: dict[str, int] = {}
@@ -166,7 +174,7 @@ def _retrieve_hybrid(
     vector_ranked: list[str] = []
 
     # 1) 向量路候选（每组取 top k*2，给融合留放量）
-    for gid, store in store_map.items():
+    for gid, store in active_stores.items():
         for hit in store.query(vector, limit):
             if hit.id in vector_scores:
                 continue  # id 全局唯一（doc_id:chunk_index），跨组重入只记一次
@@ -178,7 +186,7 @@ def _retrieve_hybrid(
 
     # 2) BM25 语料 = 全池（向量候选本就在 texts 池里；再拉全量补上向量没召回的块——
     #    「关键词强命中但余弦擦边」的块只可能从 get_all 这条路进候选）
-    for gid, store in store_map.items():
+    for gid, store in active_stores.items():
         for item in store.get_all():
             if item.id in texts:
                 continue

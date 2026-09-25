@@ -19,6 +19,20 @@ from app.db.session import Base, make_engine
 from app.rag.vector_store import ChromaStore
 
 
+@pytest.fixture(autouse=True)
+def _pin_retrieval_mode_vector(monkeypatch):
+    """测试默认锁「纯向量」模式——测试结果不得随开发机 .env 漂移。
+
+    2026-09-25 实例：产品经理在 .env 开了 RETRIEVAL_MODE=hybrid 后，
+    全量 pytest 跟着跑进 hybrid 路径，既有向量用例的语义悄悄变了。
+    默认钉死 vector 保证基线可复现；测混合检索的用例在自己体内
+    monkeypatch 覆盖为 hybrid（测试内 setattr 晚于本夹具，必然生效）。
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "retrieval_mode", "vector")
+
+
 @pytest.fixture()
 def db_session():
     """干净的 SQLite 内存会话：每个测试独立建表，互不干扰。

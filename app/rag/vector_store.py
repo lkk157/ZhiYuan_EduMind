@@ -207,9 +207,16 @@ class ChromaStore:
             return {}
         res = self._col.get(ids=list(ids), include=["embeddings"])
         out: dict[str, list[float]] = {}
-        for id_, emb in zip(res.get("ids") or [], res.get("embeddings") or []):
+        # ★ 不能写 `res.get("embeddings") or []`（2026-09-25 生产 500 实测踩坑）：
+        # chroma 对 embeddings 返回 numpy 二维数组，ndarray 的真值判断对多元素
+        # 数组直接抛「truth value is ambiguous」——ids/documents 是 Python list
+        # 才能用 `or []`，embeddings 必须显式判 None 后逐元素转 list。
+        embeddings = res.get("embeddings")
+        if embeddings is None:
+            return out
+        for id_, emb in zip(res.get("ids") or [], list(embeddings)):
             if emb is not None:
-                out[id_] = list(emb)
+                out[id_] = [float(x) for x in emb]
         return out
 
     def delete(self, ids: list[str]) -> None:

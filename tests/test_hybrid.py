@@ -130,3 +130,20 @@ async def test_vector_mode_never_touches_bm25(monkeypatch, make_store):
     monkeypatch.setattr(type(store), "get_all", _forbidden)
     hits = await retriever.retrieve("快速傅里叶变换", user_id=1, group_ids=[1], stores={1: store})
     assert hits  # 纯向量路径正常工作（阈值默认，keyed 向量余弦=1 命中）
+
+
+@pytest.mark.asyncio
+async def test_get_embeddings_roundtrip_handles_numpy(monkeypatch, make_store):
+    """★回归（2026-09-25 生产 500）：get_embeddings 必须吃得下 chroma 返回的 numpy 数组。
+
+    当年写成 `res.get("embeddings") or []`——ndarray 真值判断直接抛
+    「truth value of an array is ambiguous」，只在「BM25 独家命中补余弦」
+    路径触发（普通提问测不到），范围提问必炸。本用例直接打该方法锁死。
+    """
+    monkeypatch.setattr(embeddings, "embed_texts", _KeyedEmbed())
+    store = make_store()
+    await _seed_store(store)
+    out = store.get_embeddings(["1:0"])  # 修复前此行即抛 ValueError
+    assert "1:0" in out
+    assert out["1:0"] == pytest.approx([1.0, 0.0])  # keyed 假向量原样取回
+    assert store.get_embeddings(["不存在的id"]) == {}

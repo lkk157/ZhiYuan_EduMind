@@ -31,3 +31,21 @@
 5. 逐处修正；教训：**测试里的花活（三目占位、无序解包）比正经代码更危险**——写完必须让断言先跑起来。
 
 **遗留**（下一步验收项）：① 用户改写 `config/eval_dataset.json` 贴课件后重跑标定，回填 `SCORE_THRESHOLD`；② `RETRIEVAL_MODE=hybrid` 重启服务做 A/B 对比（`BM25_FLOOR` 初值 2.0 待 hybrid 体验后微调）；③ rerank 明确不做（依赖过重），已属 README 升级路径叙事。
+
+---
+
+## 阶段内增强补记（2026-09-25 hybrid 切换后线上排障）
+
+### 又遇到什么问题
+
+6. **★生产 500：`ValueError: truth value of an array is ambiguous`**——用户切 `RETRIEVAL_MODE=hybrid` 后，「第一章讲了什么」类范围提问打 `/chat/ask` 必炸，普通提问正常；
+7. **★越权隐患被既有测试当场抓住**：`test_group_isolation` 失败——hybrid 按 `store_map` 全键遍历而不是按 `group_ids` 授权遍历，stores 比授权宽时会捞到未授权分组的内容；
+8. **测试随开发机 `.env` 漂移**：`.env` 开 hybrid 后全量 pytest 悄悄跑进混合路径，向量用例语义变了（17 连环失败的放大器）；
+9. 补签名时第一版漏传 `group_ids` 参数 → NameError 连环 17 个失败。
+
+### 又怎么解决的
+
+6. 定位手法：**双路复现**——进程内直连检索正常（排除检索层）→ TestClient 打全链路（`raise_server_exceptions` 把服务端栈原样抛出）→ 栈钉死 `vector_store.get_embeddings` 的 `res.get("embeddings") or []`。根因：chroma 对 `include=["embeddings"]` 返回 **numpy 二维数组**，ndarray 真值判断对多元素数组直接抛错（ids/documents 是 list 才能用 `or []`）。修复为显式判 `None` 后 `list()` 逐元素转 float；新增 `test_get_embeddings_roundtrip_handles_numpy` 回归（该路径只有「BM25 独家命中补余弦」会走，普通提问测不到——所以必须单独立测）。修复后四种场景（普通/章节/出题/页码）全链路 200 实测通过；
+7. hybrid 循环改为 **`group_ids ∩ store_map` 交集**（`group_ids` 是授权权威，与向量路径同口径），注释写明被哪个测试抓住、为什么这是越权而非 bug 修辞；
+8. conftest 加 autouse 夹具 `_pin_retrieval_mode_vector`：默认钉死 vector 保证基线可复现，测 hybrid 的用例体内自行覆盖（测试内 setattr 晚于夹具必然生效）——测试结果从此不随开发机 `.env` 漂移；
+9. 补齐 `_retrieve_hybrid(group_ids=...)` 签名与调用点，全量 163 passed。
