@@ -59,18 +59,32 @@ def render_quiz_card(
             stem = q.get("question", "")
             if qtype == "choice":
                 options = [str(o) for o in q.get("options") or []]
-                # index=None：未选择时返回 None（Streamlit 1.64 原生支持，无 accept_none 参数）——
-                # 未作答按空串送判分（单选后端计 0 分）
-                picked = st.radio(
-                    f"第 {i + 1} 题. {stem}",
-                    options,
-                    index=None,
-                    key=f"{key_prefix}_q{i}",
-                )
-                # 取选项字母（A/B/C/D）而不是整句文本：与标准答案格式对齐
-                answers.append(
-                    chr(ord("A") + options.index(picked)) if picked in options else ""
-                )
+                std = str(q.get("answer", "")).upper()
+                if len(std) > 1:
+                    # 多选题（answer 为多个字母，如 "AB"）→ checkbox 组，可多选——
+                    # 2026-09-25 反馈的修复点：radio 单选框容不下多选题
+                    picked = st.multiselect(
+                        f"第 {i + 1} 题（多选）. {stem}",
+                        options,
+                        key=f"{key_prefix}_q{i}",
+                    )
+                    letters = sorted(
+                        chr(ord("A") + options.index(p)) for p in picked if p in options
+                    )
+                    answers.append("".join(letters))
+                else:
+                    # index=None：未选择时返回 None（Streamlit 1.64 原生支持，无 accept_none 参数）——
+                    # 未作答按空串送判分（单选后端计 0 分）
+                    picked = st.radio(
+                        f"第 {i + 1} 题. {stem}",
+                        options,
+                        index=None,
+                        key=f"{key_prefix}_q{i}",
+                    )
+                    # 取选项字母（A/B/C/D）而不是整句文本：与标准答案格式对齐
+                    answers.append(
+                        chr(ord("A") + options.index(picked)) if picked in options else ""
+                    )
             else:  # short 简答
                 ans = st.text_input(
                     f"第 {i + 1} 题. {stem}",

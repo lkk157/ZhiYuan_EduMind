@@ -21,8 +21,14 @@ def render_sources(sources: list[dict]) -> None:
         with st.container(border=True):
             # 序号 + 文件名 + 页码：溯源三要素一眼可见（答辩演示就指这里）
             st.markdown(f"**{i}. {src.get('file_name', '?')} · 第 {src.get('page_no', '?')} 页**")
-            # 片段是「让用户核对出处」的证据，用 caption 弱化不抢答案的视觉焦点
-            st.caption(src.get("snippet", ""))
+            # 片段是「让用户核对出处」的证据，用 caption 弱化不抢答案的视觉焦点；
+            # 相似度分数（2026-09-25 起后端透出）让用户看见命中质量，也是阈值标定的数据来源
+            snippet = src.get("snippet", "")
+            score = src.get("score")
+            if score is not None:
+                st.caption(f"{snippet}（相似度 {score:.2f}）" if snippet else f"相似度 {score:.2f}")
+            else:
+                st.caption(snippet)
 
 
 def render_hit_badge(hit: bool) -> None:

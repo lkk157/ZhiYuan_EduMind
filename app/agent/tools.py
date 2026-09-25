@@ -52,6 +52,9 @@ def build_sources(chunks: Sequence["RetrievedChunk"]) -> list[dict]:
                 "file_name": chunk.file_name,
                 "page_no": chunk.page_no,
                 "snippet": chunk.text[:SNIPPET_LEN],
+                # 相似度分数透出（2026-09-25 质量优化）：用户与标定流程都看得见命中质量，
+                # SCORE_THRESHOLD 的 3正3负标定从此有数据依据而不是拍脑袋
+                "score": round(float(chunk.score), 4),
             }
         )
     return sources
@@ -131,6 +134,16 @@ def parse_quiz(raw: str) -> dict | None:
             options = q.get("options")
             if not isinstance(options, list) or len(options) < 2:
                 return None
+            # ---- 多选识别与校验（2026-09-25 反馈：单选框容不下多选题）----
+            # answer 允许一个或多个字母（"A"=单选 / "AB"=多选），但必须：
+            # 纯字母、无重复、不超过选项数——不合法说明模型输出坏掉，整卷拒收走兜底
+            ans = str(q["answer"]).strip().upper()
+            if not ans.isalpha() or len(set(ans)) != len(ans):
+                return None
+            if any(ch > chr(ord("A") + len(options) - 1) for ch in ans):
+                return None
+            # 归一化为升序（"BA"→"AB"）：渲染与判分都按同一字面比较，不吃顺序差异
+            q["answer"] = "".join(sorted(ans))
     return obj
 
 
@@ -142,7 +155,11 @@ async def quiz_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
     前端试题卡与来源卡片并排展示，信息一点不少。
     JSON 解析失败走统一兜底口径（hit=false + 固定话术）：宁可让用户重问一次，
     也不返回半残 JSON 让前端渲染报错；失败细节进日志排查。
+
+    top_k 截断：检索池按全工具最大值召回（graph 层），出题只要最聚焦的前
+    top_k_quiz 块——材料越杂题目越散（2026-09-25 反馈的根因之一）。
     """
+    chunks = chunks[: settings.top_k_quiz]
     system, prompt = build_quiz_prompt(question, chunks)
     raw = await gateway.generate(
         model=settings.llm_model,
@@ -166,7 +183,12 @@ async def quiz_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
 
 
 async def summary_tool(question: str, chunks: list[RetrievedChunk]) -> dict:
-    """总结：依据命中资料输出要点列表（净化/闸门/拼来源与问答完全同构）。"""
+    """总结：依据命中资料输出要点列表（净化/闸门/拼来源与问答完全同构）。
+
+    top_k_summary 默认比问答池大：总结要覆盖更全，配合范围过滤（页码/章节）
+    「广而有界」——范围由 scope 管，条数由本工具管，两层各司其职。
+    """
+    chunks = chunks[: settings.top_k_summary]
     system, prompt = build_summary_prompt(question, chunks)
     raw = await gateway.generate(
         model=settings.llm_model,
@@ -317,8 +339,13 @@ async def score_quiz(questions: list[dict], answers: list[str]) -> dict:
     short_idx: list[int] = []
     for i, q in enumerate(questions):
         if q.get("type") == "choice":
-            ok = (answers[i] if i < len(answers) else "").strip().upper() == str(q.get("answer", "")).strip().upper()
-            final_scores[i] = 100 if ok else 0
+            # 集合比对而非字符串相等：多选题 "BA" 与标准 "AB" 等价；
+            # 单选 std={"A"} picked={"A"} 同样成立——单选是多选的特例，一套逻辑通吃
+            std = {ch for ch in str(q.get("answer", "")).upper() if ch.isalpha()}
+            raw_stu = answers[i] if i < len(answers) else ""
+            stu = {ch for ch in str(raw_stu).upper() if ch.isalpha()}
+            # 未作答（空集）恒 0 分；全对（集合相等）100
+            final_scores[i] = 100 if stu and stu == std else 0
         else:
             short_idx.append(i)
 

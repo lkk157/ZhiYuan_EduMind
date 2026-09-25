@@ -134,6 +134,10 @@ selected_groups = st.multiselect(
 )
 if not selected_groups:
     st.caption("请至少选择一个分组作为检索范围。")
+st.caption(
+    "范围问法（质量优化）：「总结第1-10页」「第一章讲了什么」——"
+    "页码直接过滤，章节按 PDF 目录映射（无目录的课件请用页码问法）。"
+)
 
 # 引导式答疑（M4 苏格拉底模式）：默认关——不影响既有直答行为，演示时现场打开
 st.toggle(
@@ -165,6 +169,10 @@ for idx, msg in enumerate(history):
                     st.caption(f":material/route: 意图：{_INTENT_LABELS.get(intent, intent)}")
                 render_hit_badge(msg.get("hit", True))
             render_sources(msg.get("sources") or [])
+            # 范围解析降级提示（如「课件无目录，请用第X-Y页问法」）——
+            # 只有活体回答带 scope_note（服务端不落库，回看不显示；见模块注释）
+            if msg.get("scope_note"):
+                st.info(msg["scope_note"])
         else:
             st.markdown(msg["content"])
 
@@ -224,7 +232,7 @@ if prompt:
                 conversation_id=conv_id,
                 guide_mode=bool(st.session_state.get("guide_mode")),
             )
-            # 落历史缓存（intent 只活在本会话内存里，回看时服务端没有该字段——见模块注释）
+            # 落历史缓存（intent/scope_note 只活在本会话内存里，回看时服务端没有该字段——见模块注释）
             history.append(
                 {
                     "role": "assistant",
@@ -232,6 +240,7 @@ if prompt:
                     "sources": result.get("sources") or [],
                     "hit": result["hit"],
                     "intent": result.get("intent"),
+                    "scope_note": result.get("scope_note"),
                 }
             )
             # 重跑后由上方统一渲染循环上屏（成功/失败两条路径同构，避免两处逻辑漂移）

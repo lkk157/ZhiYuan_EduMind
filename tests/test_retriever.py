@@ -136,3 +136,38 @@ async def test_blank_question_short_circuit(monkeypatch, make_store):
 def test_settings_threshold_used_by_default(monkeypatch, fake_embed_fn, make_store):
     """缺省阈值来自 settings（配置只从 .env 读）——确认 retrieve 不硬编码阈值。"""
     assert settings.score_threshold > 0  # 配置存在即可；具体数值 M2 验收后标定
+
+
+@pytest.mark.asyncio
+async def test_page_range_and_file_filters(monkeypatch, fake_embed_fn, make_store):
+    """范围过滤（2026-09-25 质量优化）：page_range 按页码区间、file_name 按文件收窄候选。"""
+    monkeypatch.setattr(embeddings, "embed_texts", fake_embed_fn)
+    store = make_store()
+    await store.upsert(
+        ids=["1:0", "1:1", "1:2"],
+        texts=[TEXT_HIT, TEXT_HIT + "补充", TEXT_HIT + "再补"],
+        metadatas=[
+            {"file_name": "讲义.docx", "page_no": 1, "chunk_index": 0, "doc_id": 1, "group_id": 1, "user_id": 1},
+            {"file_name": "讲义.docx", "page_no": 5, "chunk_index": 1, "doc_id": 1, "group_id": 1, "user_id": 1},
+            {"file_name": "杂记.docx", "page_no": 9, "chunk_index": 2, "doc_id": 2, "group_id": 1, "user_id": 1},
+        ],
+    )
+    base = dict(
+        question="梯度下降的学习率过大会导致损失函数震荡",
+        user_id=1,
+        group_ids=[1],
+        stores={1: store},
+        top_k=5,
+        threshold=0.01,
+    )
+    # 页码区间 (4,6)：只剩第 5 页的块
+    hits = await retriever.retrieve(page_range=(4, 6), **base)
+    assert [h.page_no for h in hits] == [5]
+    # 单页 (1,1)：只剩第 1 页
+    hits = await retriever.retrieve(page_range=(1, 1), **base)
+    assert [h.page_no for h in hits] == [1]
+    # 文件过滤：只剩杂记.docx
+    hits = await retriever.retrieve(file_name="杂记.docx", **base)
+    assert [h.file_name for h in hits] == ["杂记.docx"]
+    # 区间超出所有页码 → 空（范围无命中走兜底，不越界返回）
+    assert await retriever.retrieve(page_range=(100, 120), **base) == []

@@ -31,6 +31,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.agent import intent, tools
+from app.core.config import settings
 from app.memory import short_term
 from app.rag.retriever import retrieve  # ★测试补丁缝：monkeypatch app.agent.graph.retrieve
 
@@ -47,6 +48,10 @@ class AgentState(TypedDict, total=False):
     group_ids: list[int]
     history: list[dict]
     guide_mode: bool
+    # 范围过滤（agent/scope.py 在接口层解析后传入，图内只负责透传给检索）
+    page_range: tuple[int, int] | None
+    file_name: str | None
+    scope_note: str | None
     # 节点产物
     intent: str
     rewritten: str
@@ -69,9 +74,21 @@ async def _node_start(state: AgentState) -> dict:
 
 
 async def _node_retrieve(state: AgentState) -> dict:
-    """检索（用改写后的独立问题）：阈值/截断在 retriever 内，空列表=没达标资料。"""
+    """检索（改写后的问题 + 范围过滤）：阈值/截断在 retriever 内，空列表=没达标资料。
+
+    检索池按三工具 top_k 的最大值召回：各工具随后各自截断（出题聚焦/总结更全），
+    池子不够大时「总结」会先被默认 top_k 削掉材料——取 max 保证谁都不缺料。
+    """
     query = state.get("rewritten") or state["question"]
-    chunks = await retrieve(query, user_id=state["user_id"], group_ids=state["group_ids"])
+    pool_k = max(settings.top_k, settings.top_k_quiz, settings.top_k_summary)
+    chunks = await retrieve(
+        query,
+        user_id=state["user_id"],
+        group_ids=state["group_ids"],
+        top_k=pool_k,
+        page_range=state.get("page_range"),
+        file_name=state.get("file_name"),
+    )
     return {"chunks": chunks}
 
 
@@ -165,11 +182,16 @@ async def run_agent(
     group_ids: list[int],
     history: list[dict],
     guide_mode: bool = False,
+    page_range: tuple[int, int] | None = None,
+    file_name: str | None = None,
+    scope_note: str | None = None,
 ) -> dict[str, Any]:
-    """跑一轮 Agent，返回 {answer, sources, hit, intent} 四字段契约。
+    """跑一轮 Agent，返回 {answer, sources, hit, intent, scope_note} 契约。
 
     薄封装的意义：接口层只认这一个函数，图的编译/状态构造细节全部内聚在本模块；
     返回前做键级兜底——图内任一节点漏写字段时，宁可给兜底值也不让 KeyError 变 500。
+    scope_note：范围解析失败的人话提示（如「课件无目录请用页码提问」），
+    命中/兜底都原样带给前端展示；解析成功或无范围词时为 None。
     """
     final: AgentState = await get_graph().ainvoke(
         {
@@ -178,6 +200,9 @@ async def run_agent(
             "group_ids": group_ids,
             "history": history,
             "guide_mode": guide_mode,
+            "page_range": page_range,
+            "file_name": file_name,
+            "scope_note": scope_note,
         }
     )
     return {
@@ -185,4 +210,5 @@ async def run_agent(
         "sources": final.get("sources") or [],
         "hit": bool(final.get("hit")),
         "intent": final.get("intent") or intent.INTENT_QA,
+        "scope_note": final.get("scope_note"),
     }

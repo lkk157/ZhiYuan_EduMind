@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.agent.graph import run_agent
+from app.agent.scope import resolve_scope
 from app.agent.tools import score_quiz
 from app.api.auth import get_current_user
 from app.core.exceptions import AppError, NotFoundError, UpstreamError
@@ -191,13 +192,24 @@ async def ask(
     # 2) 滑窗读历史（仅会话问答有历史；无历史时后续改写零模型调用）
     history = load_window(db, user_id=user.id, conversation_id=body.conversation_id)
 
-    # 3) Agent 状态图：计算旁路/改写 → 检索 → 分类 → 四工具（布局见 agent/graph.py）
+    # 2.5) 范围解析（「第X-Y页」「第N章」→ 检索过滤条件；无范围词时零开销返回 None）。
+    #     放接口层是因为它要读 DB（文档文件路径）——图内拿不到会话外的事实源。
+    scope, scope_note = resolve_scope(
+        db, user_id=user.id, group_ids=group_ids, question=body.question
+    )
+    page_range = scope.get("page_range") if scope else None
+    scope_file = scope.get("file_name") if scope else None
+
+    # 3) Agent 状态图：计算旁路/改写 → 检索（带范围过滤） → 分类 → 四工具（布局见 agent/graph.py）
     result = await run_agent(
         question=body.question,
         user_id=user.id,
         group_ids=group_ids,
         history=history,
         guide_mode=body.guide_mode,
+        page_range=page_range,
+        file_name=scope_file,
+        scope_note=scope_note,
     )
 
     # 4) 会话落库（可选）：hit=false 的兜底轮同样落库（历史不许选择性失忆）；

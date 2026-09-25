@@ -39,13 +39,18 @@ async def retrieve(
     stores: dict | None = None,
     top_k: int | None = None,
     threshold: float | None = None,
+    page_range: tuple[int, int] | None = None,
+    file_name: str | None = None,
 ) -> list[RetrievedChunk]:
     """按问题检索若干分组下的相关资料块，按 score 降序返回。
 
     参数：
     - group_ids: 本次允许检索的知识分组（权限边界，只查这些分组的 collection）；
     - stores: {group_id: ChromaStore}，供单测注入假向量库；缺省用 store_for 现建；
-    - top_k / threshold: 缺省取 settings.top_k / settings.score_threshold（阈值在 M3 标定后回填 .env）。
+    - top_k / threshold: 缺省取 settings.top_k / settings.score_threshold（阈值在 M3 标定后回填 .env）；
+    - page_range / file_name: 范围过滤（M4 质量优化第 2 层，来自 agent/scope.py 的
+      「第X-Y页」「第N章」解析）——命中块按页码区间/文件名先过滤再过阈值，
+      用户指定了范围就绝不把范围外的块喂给模型（总结越界的根治）。
 
     返回空列表表示「没召回到达标资料」——本层不编兜底话术，
     由调用方（/chat/ask）决定走 FALLBACK_MESSAGE 且不调 LLM（防幻觉兜底）。
@@ -87,6 +92,14 @@ async def retrieve(
                     group_id=int(meta.get("group_id", gid) or gid),
                 )
             )
+
+    # 范围过滤放在排序/阈值之前：先按用户指定的页码区间/文件收窄候选，
+    # 再在范围内做阈值+截断——顺序反了会把范围外的高分块截进来
+    if page_range is not None:
+        lo, hi = page_range
+        collected = [c for c in collected if lo <= c.page_no <= hi]
+    if file_name:
+        collected = [c for c in collected if c.file_name == file_name]
 
     # 合并各分组命中后统一排序：score 降序（同分稳定，命中顺序可复现，便于测试断言）
     collected.sort(key=lambda c: c.score, reverse=True)

@@ -210,3 +210,79 @@ async def test_score_llm_garbage_raises(monkeypatch):
     questions = [{"type": "short", "question": "Q", "answer": "标准"}]
     with pytest.raises(RuntimeError):
         await tools.score_quiz(questions, ["作答"])
+
+
+# ===== 多选识别与判分（2026-09-25 质量优化）=====
+
+
+def test_parse_quiz_multi_answer_normalized():
+    """多选题：answer 多字母合法（"BA" 归一化为 "AB"）；单选仍是一个字母。"""
+    quiz = {
+        "type": "quiz",
+        "questions": [
+            {"type": "choice", "question": "Q1", "options": ["A. x", "B. y", "C. z", "D. w"],
+             "answer": "BA", "explanation": "e"},
+            {"type": "choice", "question": "Q2", "options": ["A. x", "B. y"], "answer": "A"},
+        ],
+    }
+    import json as _json
+
+    out = tools.parse_quiz(_json.dumps(quiz, ensure_ascii=False))
+    assert out is not None
+    assert out["questions"][0]["answer"] == "AB"  # 顺序归一化
+    assert out["questions"][1]["answer"] == "A"
+
+
+@pytest.mark.parametrize("bad_answer", ["E", "AA", "A1", "!"])
+def test_parse_quiz_invalid_answers_rejected(bad_answer):
+    """answer 越界/重复/非字母 → 整卷拒收（半残题卡宁可兕底）。"""
+    quiz = {
+        "type": "quiz",
+        "questions": [
+            {"type": "choice", "question": "Q", "options": ["A. x", "B. y", "C. z", "D. w"],
+             "answer": bad_answer},
+        ],
+    }
+    import json as _json
+
+    assert tools.parse_quiz(_json.dumps(quiz)) is None
+
+
+@pytest.mark.asyncio
+async def test_score_multi_choice_set_compare(monkeypatch):
+    """多选判分按集合比对：'BA'=='AB' 全对；漏选一个 0 分。单选是集合特例。"""
+    monkeypatch.setattr("app.agent.tools.gateway", _NoCall())
+    questions = [
+        {"type": "choice", "question": "Q1", "options": ["A", "B", "C", "D"], "answer": "AB"},
+        {"type": "choice", "question": "Q2", "options": ["A", "B", "C", "D"], "answer": "A"},
+    ]
+    out = await tools.score_quiz(questions, ["BA", "A"])  # 顺序不同但集合相等
+    assert out["score"] == 100
+    out = await tools.score_quiz(questions, ["A", "A"])  # 多选漏选 B → 0 分
+    assert out["score"] == 50
+
+
+def test_build_sources_exposes_score():
+    """sources 透出相似度分数（阈值标定与用户可见的数据依据）。"""
+    out = tools.build_sources([_chunk()])
+    assert out[0]["score"] == pytest.approx(0.9, abs=1e-4)
+
+
+def test_quiz_prompt_locks_type_and_count_obedience():
+    """锁 prompt 契约：题型服从/道数服从/算法题示例必须在——出题质量的文本层地基。"""
+    from app.rag.prompts import build_quiz_prompt
+
+    system, _ = build_quiz_prompt("出3道算法题", [_chunk()])
+    assert "题型服从" in system
+    assert "道数服从" in system
+    assert "禁止降级成选择题" in system
+    assert "辗转相除法" in system  # 算法题 few-shot 锚点
+
+
+def test_summary_prompt_locks_scope_discipline():
+    """锁 prompt 契约：范围纪律必须在——「总结第一章却总结全书」的文本层防线。"""
+    from app.rag.prompts import build_summary_prompt
+
+    system, _ = build_summary_prompt("总结第一章", [_chunk()])
+    assert "范围纪律" in system
+    assert "覆盖范围" in system
