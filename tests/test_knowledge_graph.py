@@ -72,8 +72,16 @@ def test_related_for_dynamic_new_file_included():
 
 
 @pytest.mark.asyncio
-async def test_related_for_semantic_excludes_self(monkeypatch, make_store):
-    """语义近邻：存量向量查询（零 embedding）、排除自身与已有结构推荐目标。"""
+async def test_related_for_semantic_excludes_self(monkeypatch, make_store, fake_embed_fn):
+    """语义近邻：存量向量查询（零 embedding）、排除自身与已有结构推荐目标。
+
+    为什么 upsert 前必须打假向量桩（2026-10-20 修）：ChromaStore.upsert 写库时
+    会调 embeddings.embed_texts——上一版把「严禁调用」桩打在了 upsert 之后，
+    写数据阶段实际直连了真实 Ollama。Ollama 在线时测试侥幸全绿，停机后立刻
+    ConnectError——单测零网络纪律被无声破坏。准备阶段用确定性假向量，
+    验证阶段再换成「一调即失败」桩，两段各司其职。
+    """
+    monkeypatch.setattr("app.rag.embeddings.embed_texts", fake_embed_fn)  # upsert 用假向量
     store = make_store()
     await store.upsert(
         ids=["1:0", "1:1", "1:2"],
@@ -96,6 +104,7 @@ async def test_related_for_semantic_excludes_self(monkeypatch, make_store):
     assert items[0].file_name == "双链结构.pdf"
     assert items[0].relation == "内容相近"
     # 零 embedding：本模块只用存量向量——embeddings.embed_texts 一被调用即失败
+    # （此刻数据已写好，替换掉上面的假向量桩，验证阶段才具备「调用即失败」语义）
     monkeypatch.setattr(
         "app.rag.embeddings.embed_texts",
         lambda texts: (_ for _ in ()).throw(AssertionError("语义近邻严禁调用 embedding")),

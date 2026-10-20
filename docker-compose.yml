@@ -1,0 +1,67 @@
+# 知源 ZhiYuan_EduMind · 应用层容器编排（M7-1）
+#
+# 架构：浏览器 → web(Streamlit) → api(FastAPI) → 宿主机 MySQL / 宿主机 Ollama
+# - Ollama 与 MySQL 不容器化（原因见 Dockerfile 头注释与 README）
+# - .env 通过 env_file 注入，镜像内不含任何密码
+# - data/ 与 logs/ 绑定挂载：知识库（上传件+Chroma）与日志在容器重建后仍在
+#
+# 启动前：宿主机 MySQL、Ollama 必须已运行；宿主机 8000/8501 未被原生服务占用。
+# 启动：docker compose up -d --build
+# 停止：docker compose down（数据卷是绑定挂载，不会被删）
+
+services:
+  api:
+    build: .
+    image: zhiyuan-edumind:latest
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    environment:
+      # 容器内的 127.0.0.1 是容器自己——必须显式指向宿主机
+      # （compose 的 environment 优先级高于 env_file，覆盖 .env 里的本机地址）
+      MYSQL_HOST: host.docker.internal
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    # Linux 引擎兼容（Windows/macOS 的 Docker Desktop 内置该主机名）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      # 端口可覆盖（原生服务占用 8000 时：API_PORT=18000 docker compose up -d）
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      # 用 python 标准库做探针：镜像不装 curl；/healthz 免鉴权且不碰模型（见 main.py）
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  web:
+    build: .
+    image: zhiyuan-edumind:latest
+    command:
+      - streamlit
+      - run
+      - frontend/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    env_file:
+      - .env
+    environment:
+      # 浏览器不直连后端：Streamlit 进程在 compose 内网按服务名调 api
+      API_BASE_URL: http://api:8000
+    ports:
+      # 同上：WEB_PORT=18501 docker compose up -d
+      - "${WEB_PORT:-8501}:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

@@ -1,0 +1,26 @@
+# 构建上下文排除清单（M7-1）——镜像只装代码，不装环境与运行时数据
+
+# 密钥：真实密码绝不进镜像层（即使 .gitignore 已排除，构建上下文是另一条路）
+.env
+
+# 运行时数据：由 compose 绑定挂载提供，绝不能烤进镜像
+data/
+logs/
+tmp/
+
+# 版本控制与本地环境
+.git/
+.venv/
+venv/
+.vscode/
+.idea/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# 系统杂项
+Thumbs.db
+desktop.ini

@@ -20,6 +20,7 @@
 | Agent 编排 | LangGraph | 显式意图分类 + 代码级工具路由（防 7B 工具调用漂移） |
 | 鉴权 | JWT（PyJWT + bcrypt） | 多端登录，核心数据表绑定 user_id |
 | 测试 | pytest / pytest-asyncio | 每阶段单元测试门禁 |
+| 交付 | Docker Compose（应用层） | FastAPI/Streamlit 容器化；Ollama 与 MySQL 留宿主机（见下方 Docker 运行） |
 
 \* OCR 模型名以 `ollama pull` 实际结果为准；不可用时按「快速开始」中的 fallback 切换，仅需修改 `.env`。**所有模型名以 `ollama list` 输出的 NAME 为准。**
 
@@ -61,6 +62,37 @@
    # 终端 2：前端界面（http://127.0.0.1:8501；默认打 127.0.0.1:8000，可用环境变量 API_BASE_URL 覆盖）
    streamlit run frontend/app.py
    ```
+
+7. **Docker 运行（可选交付形态，M7）**：
+
+   前置（三件，缺一启动即失败）：
+   1. **Docker Desktop 已启动**；原生 8000/8501 已停止（或 `API_PORT=18000 WEB_PORT=18501 docker compose up -d`）。
+   2. **MySQL 专用账号**：容器来自 Docker 网关 IP，`root@localhost` 连不上。用 root 执行一次（密码与 `.env` 一致，库名按 `MYSQL_DB`）：
+      ```sql
+      CREATE USER 'zhiyuan'@'%' IDENTIFIED BY '<你的密码>';
+      GRANT ALL PRIVILEGES ON zhiyuan.* TO 'zhiyuan'@'%';
+      CREATE USER 'zhiyuan'@'localhost' IDENTIFIED BY '<你的密码>';
+      GRANT ALL PRIVILEGES ON zhiyuan.* TO 'zhiyuan'@'localhost';
+      FLUSH PRIVILEGES;
+      ```
+      然后把 `.env` 的 `MYSQL_USER` 设为 `zhiyuan`、`MYSQL_PASSWORD` 设为同一密码（原生运行同样可用）。
+   3. **Ollama 可达性**：不同 Docker 引擎转发行为不同——本机 Windows Docker Desktop
+      实测可访问仅绑 `127.0.0.1` 的 Ollama；若你的环境容器连不上，设置系统环境变量
+      `OLLAMA_HOST=0.0.0.0:11434` 后重启 Ollama（仅本机/内网使用，勿暴露公网）。
+      容器内自检命令：
+      ```bash
+      docker compose exec api python -c "import urllib.request; print(urllib.request.urlopen('http://host.docker.internal:11434/api/tags', timeout=5).status)"
+      ```
+   ```bash
+   docker compose up -d --build     # 首次构建约数分钟（装依赖）
+   docker compose ps                # api 应为 healthy；浏览器开 http://127.0.0.1:8501
+   docker compose logs -f api       # 排障看后端日志
+   docker compose down              # 停止（data/logs 是绑定挂载，不会丢）
+   ```
+   - 容器内只有应用层：Ollama 与 MySQL 通过 `host.docker.internal` 访问宿主机（GPU 不进行透传）；
+   - `.env` 以 `env_file` 注入，**镜像中不含任何密码**；`data/`、`logs/` 绑定挂载，知识库与日志随宿主机保留；
+   - **后端必须单实例**：显存互斥锁是进程内实现，禁止 `--scale`/多副本；
+   - 答辩兜底：Docker 不可用时按第 6 步原生方式启动，行为完全一致。
 
 ## 目录结构与开发里程碑
 完整目录树（含每文件职责标注）与 M0–M6 开发计划（2026-09-23 重排）见 **[docs/ROADMAP.md](docs/ROADMAP.md)**。

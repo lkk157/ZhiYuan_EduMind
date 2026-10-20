@@ -6,6 +6,9 @@ pydantic-settings>=2.3
 python-dotenv>=1.0
 SQLAlchemy>=2.0
 PyMySQL>=1.1
+# PyMySQL 连接 MySQL 8 默认认证插件 caching_sha2_password 的必要依赖
+# （开发机由其他包传递带入；容器是干净环境，必须显式声明，M7 构建实测）
+cryptography>=3.4
 PyJWT>=2.8
 passlib[bcrypt]>=1.7
 python-multipart>=0.0.9

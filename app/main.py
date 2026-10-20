@@ -50,6 +50,19 @@ def _startup() -> None:
     logger.info("数据库表已就绪")
 
 
+@app.get("/healthz")
+def healthz() -> dict:
+    """容器存活探针（免鉴权，M7-1）：只证明「进程能响应 HTTP」。
+
+    为什么不复用 /health：
+    1. /health 要 JWT——编排探针每 10 秒打一次，不该持有用户令牌；
+    2. /health 会真实探测 Ollama（模型进程/网络调用）——探针只判断容器存活，
+       探测依赖服务会把「模型冷加载/临时忙」误判成「应用挂了」进而触发重启循环；
+    3. 依赖服务的深度体检仍走 /health（登录后人工/脚本调用），职责分离。
+    """
+    return {"status": "ok"}
+
+
 @app.get("/health")
 async def health(user: User = Depends(get_current_user)) -> dict:
     """健康检查（需登录）：一次看清「鉴权 OK + Ollama 连通 + 三模型在列」。

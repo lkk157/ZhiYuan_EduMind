@@ -23,12 +23,15 @@
 - 任一时刻大模型（LLM / OCR）**只能有一类活跃**：全局推理互斥锁 + `asyncio.Semaphore` 串行化，禁止并发打 Ollama；
 - OCR 用完即卸（`OCR_KEEP_ALIVE=0`），入库前先卸 LLM，二者**时段隔离**（OCR 只在入库流水线触发）；
 - `LLM_NUM_CTX ≤ 4096`，输出长度受控，embedding 批量限流（如一次 16 条）；
-- 提交前自查：新增代码是否可能引入并发推理或常驻大模型？不可能才允许提交。
+- 提交前自查：新增代码是否可能引入并发推理或常驻大模型？不可能才允许提交；
+- **容器化只允许后端单实例**（2026-10-20 产品经理书面确认）：显存互斥锁是进程内实现，多副本部署会让锁失守、并发打 Ollama——`docker compose` 禁止对 api 服务设置 replicas/scale。
 
 ## 4. 技术栈锁定（替换需产品经理书面确认）
 FastAPI / Streamlit / MySQL 8.x / ChromaDB / LangGraph /
 Ollama（LLM: Qwen2.5:7b（本机实际标签 `qwen2.5:7b-instruct-q4_K_M`）；视觉OCR: GLM-OCR（glm-ocr）；Embedding: Qwen3-Embedding:0.6b）/
 JWT（PyJWT）/ pytest。
+Docker（2026-10-20 书面确认）：**仅作交付形态**——容器化 FastAPI/Streamlit 应用层，
+Ollama 与 MySQL 仍留宿主机（GPU 透传不稳 + 显存互斥可证性），镜像不得包含 .env。
 
 ## 5. 代码质量约定
 - 关键函数/类必须中文 docstring，写「为什么」而不只是「做了什么」；
@@ -46,7 +49,9 @@ JWT（PyJWT）/ pytest。
 - 禁止自由发挥扩需求 / 换技术栈；
 - 禁止生成无中文注释的关键逻辑；
 - 禁止一次性生成整个项目的所有代码；
-- 禁止引入 Docker / Redis 等本机无法运行的依赖（生产方案只写进 README 对比表，不写实现）；
+- 禁止引入 Redis 等本机无法运行的依赖（生产方案只写进 README 对比表，不写实现）；
+  **Docker 例外**（2026-10-20 产品经理书面确认）：仅限应用层容器化交付（见 §4），
+  不得扩展到容器内 GPU 推理、多副本后端或把 MySQL/Ollama 搬进容器；
 - 禁止任何有显存溢出风险的设计（见第 3 节红线）。
 
 ## 8. 阶段过程报告（每阶段完成后必写）
