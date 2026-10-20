@@ -79,6 +79,45 @@ def _require_conversation(db, *, user_id: int, conversation_id: int):
     return conversation
 
 
+def resolve_group_ids(db, *, user_id: int, group_ids: list[int] | None) -> list[int]:
+    """解析检索分组（/chat/ask 与 /v1 服务化网关共用）。
+
+    为什么收成函数：分组归属校验是越权防线的一部分，两个 HTTP 契约各写一份
+    迟早漂移；缺省=本人全部分组，显式列表逐个校验（非本人/不存在统一 404 防探测），
+    并去重——重复 gid 会让同批命中翻倍进入排序。
+    """
+    if group_ids is None:
+        return [g.id for g in crud.list_kb_groups(db, user_id=user_id)]
+    resolved: list[int] = []
+    for gid in group_ids:
+        if crud.get_kb_group(db, user_id=user_id, group_id=gid) is None:
+            raise NotFoundError("分组不存在")
+        if gid not in resolved:
+            resolved.append(gid)
+    return resolved
+
+
+async def prepare_context(
+    db, *, user_id: int, question: str, group_ids: list[int]
+) -> dict:
+    """问答前置上下文（JSON/SSE 与 /v1 共用）：长效记忆召回 + 范围解析。
+
+    为什么抽出来：个性化注入（M5）与范围过滤（M4 质量优化）都不该随
+    HTTP 契约分叉——内部前端与外部服务化必须得到同一份学情背景与范围条件。
+    返回 dict 而非元组：调用方按字段名取，扩展新字段时不破坏既有签名。
+    """
+    mem_context = await recall_memories(db, user_id=user_id, question=question)
+    scope, scope_note = resolve_scope(
+        db, user_id=user_id, group_ids=group_ids, question=question
+    )
+    return {
+        "mem_context": mem_context,
+        "page_range": scope.get("page_range") if scope else None,
+        "file_name": scope.get("file_name") if scope else None,
+        "scope_note": scope_note,
+    }
+
+
 def _serialize_messages(messages) -> list[dict]:
     """Message 行 → 接口契约：sources JSON 字符串还原成 list[dict]，hit 保持 True/False/None。"""
     return [
@@ -186,33 +225,19 @@ async def ask(
             db, user_id=user.id, conversation_id=body.conversation_id
         )
 
-    # 1) 分组权限边界：缺省=本人全部分组；显式给了必须逐个确认归属，
-    #    否则借别人 group_id 提问等于跨用户检索（数据泄漏），一律 NotFoundError 防探测
-    if body.group_ids is None:
-        group_ids = [g.id for g in crud.list_kb_groups(db, user_id=user.id)]
-    else:
-        group_ids = []
-        for gid in body.group_ids:
-            if crud.get_kb_group(db, user_id=user.id, group_id=gid) is None:
-                # 非本人/不存在统一 404：不泄漏「这个分组存在但不归你」
-                raise NotFoundError("分组不存在")
-            if gid not in group_ids:  # 去重：重复的 gid 会把同批命中翻倍进入排序
-                group_ids.append(gid)
+    # 1) 分组权限边界（越权防线；/v1 共用同一函数，见 resolve_group_ids）
+    group_ids = resolve_group_ids(db, user_id=user.id, group_ids=body.group_ids)
 
     # 2) 滑窗读历史（仅会话问答有历史；无历史时后续改写零模型调用）
     history = load_window(db, user_id=user.id, conversation_id=body.conversation_id)
 
-    # 2.3) 长效记忆召回（M5 个性化）：无记忆快路零开销；语义段失败自动降级最近条——
-    #      注入是增强，绝不允许它反过来让提问失败（见 long_term.recall_memories）
-    mem_context = await recall_memories(db, user_id=user.id, question=body.question)
-
-    # 2.5) 范围解析（「第X-Y页」「第N章」→ 检索过滤条件；无范围词时零开销返回 None）。
-    #     放接口层是因为它要读 DB（文档文件路径）——图内拿不到会话外的事实源。
-    scope, scope_note = resolve_scope(
-        db, user_id=user.id, group_ids=group_ids, question=body.question
+    # 2.3+2.5) 记忆召回（M5 个性化）+ 范围解析（M4 质量优化）：
+    #     无记忆快路零开销；语义段失败自动降级最近条——注入是增强，绝不让提问失败。
+    ctx = await prepare_context(
+        db, user_id=user.id, question=body.question, group_ids=group_ids
     )
-    page_range = scope.get("page_range") if scope else None
-    scope_file = scope.get("file_name") if scope else None
+    page_range = ctx["page_range"]
+    scope_file = ctx["file_name"]
 
     # 3) 分流：SSE 流式 / 既有 JSON（校验都在上面完成——404 类错误在流开始前就返回）
     if body.stream:
@@ -226,8 +251,8 @@ async def ask(
                 history=history,
                 page_range=page_range,
                 scope_file=scope_file,
-                scope_note=scope_note,
-                mem_context=mem_context,
+                scope_note=ctx["scope_note"],
+                mem_context=ctx["mem_context"],
             ),
             media_type="text/event-stream",
         )
@@ -241,8 +266,8 @@ async def ask(
         guide_mode=body.guide_mode,
         page_range=page_range,
         file_name=scope_file,
-        scope_note=scope_note,
-        mem_context=mem_context,
+        scope_note=ctx["scope_note"],
+        mem_context=ctx["mem_context"],
     )
     _persist_result(db, conversation, body, result)
     return {**result, "conversation_id": body.conversation_id}

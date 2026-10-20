@@ -119,7 +119,7 @@ ZhiYuan_EduMind/
 | **M4 Agent 智能调度与多轮增强**（5–6天）（原 M6+M4 合并）✅ | 意图分类（答疑/出题/总结/计算）→LangGraph 分发工具；多轮滑窗 + query 改写（模糊/术语/对比/指代）；**吸收教学特色**：随堂测=出题工具、引导式答疑=答疑 prompt 开关；新增 /chat/score 判分 | agent/{graph,intent,tools}.py、memory/short_term.py、components/quiz.py | 同会话「出3道题→总结上一节→这道题怎么算」路由正确；连续追问「它呢？」指代正确；非法标签默认答疑单测过；**120 passed；tag `M4-agent`** | 7B 分类不稳→温度0+枚举+few-shot；窗口挤爆 num_ctx→N=6+截断；检索前置保「空召回零调用」硬闸门（过程报告有载） |
 | **M5 长效记忆+个性化**（4–5天）✅ | 记忆提炼与语义召回（双写）；错题解析、知识点关联推荐、题库完善 | memory/long_term.py、api/quiz.py、models 扩表 | 新会话能「记得」用户弱点并调整讲解；user_id 隔离单测过；**185 passed；动态图谱/周报/错题本落地；tag `M5-memory`** | 7B 提炼质量→模板固定字段；隐私→仅本用户可见 |
 | **M6 监控看板+答辩收尾**（3–4天）✅ | 日志完善、Streamlit 看板（提问量/高频知识点/命中率）、README 定稿、演示脚本 | monitoring/stats.py、api/monitoring.py、app_pages/4_数据看板.py、demo_e2e 完整版 | **191 passed；demo_e2e 17/17 ALL PASS（含看板对账3项）+ README/评估集定稿 + 修复改写污染缺陷；tag `M6-dashboard`** | 看板慢→拉行 Python 聚合已覆盖体量（上万行再改 SQL） |
-| **M7 容器交付+服务化**（3–5天） | ①应用层 Docker 打包（Ollama/MySQL 留宿主）；②RAG 服务化 v1：API Key + `/v1/rag/*` + 429 背压 + 调用文档 | Dockerfile、docker-compose.yml、app/api/v1.py、api_keys 表与接口、docs/API-服务化调用指南.md | **M7-1：compose 两服务 healthy + demo_e2e 17/17；M7-2：Key 鉴权/越权/429 单测全绿；tag `M7-service`** | GPU 透传→不容器化模型；多副本→禁止（锁失守）；端口冲突→停原生服务或改端口 |
+| **M7 容器交付+服务化**（3–5天）✅ | ①应用层 Docker 打包（Ollama/MySQL 留宿主）；②RAG 服务化 v1：API Key + `/v1/rag/*` + 429 背压 + 调用文档 | Dockerfile、docker-compose.yml、app/api/v1.py、api_keys 表与接口、docs/API-服务化调用指南.md | **M7-1：compose 两服务 healthy + demo_e2e 17/17；M7-2：201 passed（Key 鉴权/越权/429/SSE）、容器内 /v1 冒烟全通过；tag `M7-service`** | GPU 透传→不容器化模型；多副本→禁止（锁失守）；端口冲突→停原生服务或改端口 |
 
 > 节奏建议：每 3–7 天一个里程碑（纯开发约 5–7 周），完成后空一周回归+打磨演示；在 M2/M3/M4 各安排一次预答辩彩排。每阶段完成后按规范：**单测全绿 → `git push`**，里程碑额外打 tag；过程报告随阶段入库（CLAUDE.md §8）。
 

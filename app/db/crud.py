@@ -16,7 +16,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError
+from app.core.security import generate_api_key
 from app.db.models import (
+    ApiKey,
     ChunkFingerprint,
     Conversation,
     Document,
@@ -511,6 +513,64 @@ def list_memory_facts(
         stmt.order_by(MemoryFact.id.desc()).limit(limit)
     ).scalars()
     return list(rows)
+
+
+# ===== 服务化 API Key（M7-2）=====
+
+
+def create_api_key(db: Session, *, user_id: int, name: str) -> tuple[ApiKey, str]:
+    """签发一把 Key，返回 (数据库行, 明文)。明文只在此刻出现一次，调用方必须自存。"""
+    plain, prefix, digest = generate_api_key()
+    row = ApiKey(user_id=user_id, name=name, key_prefix=prefix, key_hash=digest)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row, plain
+
+
+def list_api_keys(db: Session, *, user_id: int) -> list[ApiKey]:
+    """本人全部 Key（含已吊销——保留行用于审计，列表用 is_active 区分状态）。"""
+    rows = db.execute(
+        select(ApiKey).where(ApiKey.user_id == user_id).order_by(ApiKey.id.desc())
+    ).scalars()
+    return list(rows)
+
+
+def revoke_api_key(db: Session, *, user_id: int, key_id: int) -> bool:
+    """吊销（软删）：非本人/不存在返回 False（api 层转 404 防探测）。
+
+    为什么软删而不是 DELETE：保留 key_prefix/last_used_at 便于事后审计
+    「哪把 Key、何时用过」；鉴权查询只认 is_active=True。
+    """
+    row = db.execute(
+        select(ApiKey).where(
+            ApiKey.id == key_id,
+            ApiKey.user_id == user_id,
+            ApiKey.is_active.is_(True),  # 已吊销视为不存在：重复吊销返回 404（幂等口径）
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    row.is_active = False
+    db.commit()
+    return True
+
+
+def get_active_api_key(db: Session, *, key_hash: str) -> ApiKey | None:
+    """按哈希查有效 Key（鉴权每请求热路径，key_hash 上有唯一索引）。"""
+    return db.execute(
+        select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.is_active.is_(True))
+    ).scalar_one_or_none()
+
+
+def touch_api_key(db: Session, key: ApiKey) -> None:
+    """刷新最后使用时间。
+
+    为什么每请求都写：单机低并发、单行 UPDATE 成本可忽略；用途是让管理员
+    在列表里看出「这把 Key 最近有没有被用过」（长期不用应吊销）。
+    """
+    key.last_used_at = func.now()
+    db.commit()
 
 
 def latest_memory_fact(db: Session, *, user_id: int, kind: str) -> MemoryFact | None:

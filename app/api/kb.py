@@ -161,14 +161,10 @@ def list_documents(
     ]
 
 
-@router.post("/groups/{gid}/documents")
-async def upload_documents(
-    gid: int,
-    file: list[UploadFile] = File(...),
-    user: User = Depends(get_current_user),
-    db=Depends(get_db),
-):
-    """批量上传并逐个同步入库（产品需求：单批 ≤MAX_UPLOAD_FILES、总大小 ≤MAX_UPLOAD_TOTAL_MB）。
+async def ingest_uploads(
+    db, *, user_id: int, group_id: int, files: list[UploadFile]
+) -> dict:
+    """批量上传并逐个同步入库（/kb 与 /v1 服务化网关共用同一实现）。
 
     响应契约（2026-09-24 批量化改版；单文件调用返回同结构、results 只有一项）：
     {"results":[{file_name, ok, error?, ...IngestResult 字段}], "succeeded": n, "failed": m}
@@ -179,24 +175,22 @@ async def upload_documents(
     顺序处理显存与内存都友好（一次只读当前文件，200MB 上限也不会整批驻留内存）；
     一个坏文件不该让同批其余文件白传。同名重传 = chunk 级增量（ingest_file 状态机，逐文件独立）。
     """
-    _require_group(db, user_id=user.id, group_id=gid)
-
     # --- 批次级校验（先于任何落盘/入库；客户端限制不是安全边界，服务端必须复校）---
-    if not file:
+    if not files:
         raise AppError("未收到任何文件", code=400)
-    if len(file) > settings.max_upload_files:
+    if len(files) > settings.max_upload_files:
         raise AppError(f"单批最多上传 {settings.max_upload_files} 个文件", code=400)
     # UploadFile.size 由 Starlette 解析 multipart 时填充，无需整读文件即可校验总大小
-    total_bytes = sum(int(getattr(f, "size", 0) or 0) for f in file)
+    total_bytes = sum(int(getattr(f, "size", 0) or 0) for f in files)
     limit_bytes = settings.max_upload_total_mb * 1024 * 1024
     if total_bytes > limit_bytes:
         raise AppError(f"本批文件总大小超过 {settings.max_upload_total_mb}MB 上限", code=400)
 
-    target_dir = _upload_dir_for(user.id, gid)
+    target_dir = _upload_dir_for(user_id, group_id)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[dict] = []
-    for f in file:
+    for f in files:
         # ★ 路径穿越防线：只取文件名最后一段（逐文件独立处理）
         file_name = Path(f.filename or "").name
         try:
@@ -210,7 +204,7 @@ async def upload_documents(
             # 二进制原样落盘（每次只读当前文件，处理完即释放）
             target_path.write_bytes(await f.read())
             result = await ingest_file(
-                db, user_id=user.id, group_id=gid, file_name=file_name, file_path=target_path
+                db, user_id=user_id, group_id=group_id, file_name=file_name, file_path=target_path
             )
             results.append(
                 {
@@ -239,6 +233,18 @@ async def upload_documents(
 
     succeeded = sum(1 for r in results if r["ok"])
     return {"results": results, "succeeded": succeeded, "failed": len(results) - succeeded}
+
+
+@router.post("/groups/{gid}/documents")
+async def upload_documents(
+    gid: int,
+    file: list[UploadFile] = File(...),
+    user: User = Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """批量上传端点：鉴权/归属校验后交给 ingest_uploads（与 /v1 共用业务实现）。"""
+    _require_group(db, user_id=user.id, group_id=gid)
+    return await ingest_uploads(db, user_id=user.id, group_id=gid, files=file)
 
 
 @router.delete("/documents/{did}")

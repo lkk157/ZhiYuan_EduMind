@@ -329,10 +329,55 @@ class QuizRecord(Base):
     is_correct: Mapped[bool] = mapped_column(Boolean, default=False)
     ref_file: Mapped[str] = mapped_column(String(255), default="")
     ref_page: Mapped[int] = mapped_column(Integer, default=0)
+    # 答题时间：错题本列表展示与「最近错题」排序用
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     def __repr__(self) -> str:
         return f"<QuizRecord id={self.id} user_id={self.user_id} correct={self.is_correct}>"
+
+
+class ApiKey(Base):
+    """服务化调用凭证（M7-2）：一把 Key 绑定一个系统账号（user_id）。
+
+    为什么 Key 直接绑定 user_id 而不是另建租户体系：
+    本项目全部数据隔离（知识库分组 / 向量库 collection / 记忆 / 错题）都以
+    user_id 为锚——一个调用方 = 一个系统账号，服务化零业务改动就继承完整的
+    越权防线与租户隔离；再建一层 app_id 映射只会多一张表和一层翻译。
+
+    为什么只存 sha256 哈希（★不是 bcrypt）：
+    API Key 是 secrets.token_urlsafe(32) 生成的 256 位高熵随机串，不存在人设
+    密码的字典/彩虹表风险；sha256 定长、可走唯一索引直查；bcrypt 每次验证
+    都要全表逐个 verify（O(Key 数)），放在每请求鉴权路径上不可接受。
+    明文只在创建接口的响应里出现一次，数据库永远无法还原。
+
+    为什么另存 key_prefix：管理列表与排障时能认出「是哪一把 Key」，
+    同时不暴露完整密钥；is_active=False 表示已吊销（保留行以留审计痕迹）。
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_api_keys_user"),
+        index=True,
+    )
+    # 调用方名称（如「课程门户」「教务系统」），仅用于管理页辨识
+    name: Mapped[str] = mapped_column(String(64))
+    # 展示前缀：zy_ + 前 8 位随机字符
+    key_prefix: Mapped[str] = mapped_column(String(16))
+    # sha256 十六进制（64 位）；唯一索引 = 鉴权查询走索引 + 防重复
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"<ApiKey id={self.id} user_id={self.user_id} prefix={self.key_prefix!r}>"
 
 
 def join_empty_pages(pages: list[int]) -> str:

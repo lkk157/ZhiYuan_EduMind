@@ -9,6 +9,7 @@ import logging
 
 from fastapi import Depends, FastAPI
 
+from app.api.api_keys import router as api_keys_router
 from app.api.auth import get_current_user
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
@@ -16,6 +17,7 @@ from app.api.kb import router as kb_router
 from app.api.memory import router as memory_router
 from app.api.monitoring import router as monitoring_router
 from app.api.quiz import router as quiz_router
+from app.api.v1 import router as v1_router
 from app.core.exceptions import install_error_handlers
 from app.core.llm import gateway
 from app.db.models import User
@@ -41,6 +43,9 @@ app.include_router(quiz_router)
 app.include_router(memory_router)
 # 挂监控看板路由（M6）：/monitoring/overview
 app.include_router(monitoring_router)
+# 挂服务化路由（M7-2）：JWT 管理的 /api-keys + API Key 鉴权的 /v1
+app.include_router(api_keys_router)
+app.include_router(v1_router)
 
 
 @app.on_event("startup")

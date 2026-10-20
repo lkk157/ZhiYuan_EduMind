@@ -94,6 +94,25 @@
    - **后端必须单实例**：显存互斥锁是进程内实现，禁止 `--scale`/多副本；
    - 答辩兜底：Docker 不可用时按第 6 步原生方式启动，行为完全一致。
 
+## 服务化 API（M7-2，供其他项目接入）
+
+把知识库与 RAG 能力以 `/v1` 接口提供给其他项目：API Key 鉴权（`X-API-Key`）、账号级数据隔离、
+纯检索 / 同步问答 / SSE 流式、429 背压（单机单并发是 8G 显存的物理上限）。
+
+```bash
+# 用登录 JWT 签发一把 Key（key 明文只返回一次）
+curl -X POST http://127.0.0.1:8000/api-keys \
+  -H "Authorization: Bearer <JWT>" -H "Content-Type: application/json" \
+  -d '{"name": "课程门户"}'
+
+# 调用方：纯检索 / 问答
+curl -X POST http://127.0.0.1:8000/v1/rag/retrieve \
+  -H "X-API-Key: zy_xxx" -H "Content-Type: application/json" \
+  -d '{"query": "单链表的插入", "group_ids": [1]}'
+```
+
+完整端点、错误码、Python 示例与容量声明见 **[docs/API-服务化调用指南.md](docs/API-服务化调用指南.md)**。
+
 ## 目录结构与开发里程碑
 完整目录树（含每文件职责标注）与 M0–M6 开发计划（2026-09-23 重排）见 **[docs/ROADMAP.md](docs/ROADMAP.md)**。
 

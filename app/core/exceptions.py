@@ -14,14 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
-    """业务异常基类：带 HTTP 状态码 + 面向用户的提示信息。"""
+    """业务异常基类：带 HTTP 状态码 + 面向用户的提示信息。
+
+    headers（M7-2）：少数错误需要附带协议头——典型是 429 的 Retry-After，
+    告诉调用方多久后重试；不支持的场景传 None 即可（默认不带任何头）。
+    """
 
     code = 500
     message = "服务器内部错误"
 
-    def __init__(self, message: str | None = None, code: int | None = None):
+    def __init__(
+        self,
+        message: str | None = None,
+        code: int | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         self.message = message or self.message
         self.code = code or self.code
+        self.headers = headers
         super().__init__(self.message)
 
 
@@ -53,6 +63,13 @@ class UpstreamError(AppError):
     message = "上游服务暂不可用，请稍后重试"
 
 
+class TooManyRequestsError(AppError):
+    """服务容量已满（M7-2 背压）：单机 8G 显存只允许一个推理请求，排队超时即拒绝。"""
+
+    code = 429
+    message = "服务繁忙，请稍后重试"
+
+
 def install_error_handlers(app) -> None:
     """把业务异常统一转成 JSON 错误响应。
 
@@ -71,6 +88,7 @@ def install_error_handlers(app) -> None:
         return JSONResponse(
             status_code=exc.code,
             content={"error": {"code": exc.code, "message": exc.message}},
+            headers=exc.headers,  # 429 的 Retry-After 等协议头（无则 None）
         )
 
     from fastapi.exceptions import RequestValidationError

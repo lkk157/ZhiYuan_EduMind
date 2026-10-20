@@ -10,6 +10,8 @@
 3. JWT（HS256）无状态：任何一台业务服务器都能验签，天然支持「多端登录数据一致」
    ——客户端带着 token 来，服务端从 token 里拿到 user_id，核心表全部按 user_id 隔离。
 """
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -21,6 +23,33 @@ from app.core.exceptions import AuthError
 # JWT 载荷里放的键名（保持常量，避免各处写字符串拼错）
 _CLAIM_USER_ID = "user_id"
 _CLAIM_USERNAME = "username"
+
+
+# ===== 服务化 API Key（M7-2）=====
+
+# 前缀让 Key 在日志/配置里可一眼识别（与常见 sk- 前缀同理），不是安全边界
+API_KEY_PREFIX = "zy_"
+# 展示长度：前缀 + 8 位随机字符（够识别，远不足以推回完整 Key）
+_API_KEY_PREFIX_LEN = len(API_KEY_PREFIX) + 8
+
+
+def hash_api_key(plain: str) -> str:
+    """API Key → sha256 十六进制摘要（定长 64）。
+
+    为什么不是 bcrypt：Key 是高熵随机串（见 ApiKey 模型注释），无字典风险；
+    sha256 可按唯一索引直查，而 bcrypt 只能全表逐个 verify。
+    """
+    return hashlib.sha256(plain.encode("utf-8")).hexdigest()
+
+
+def generate_api_key() -> tuple[str, str, str]:
+    """生成一把新 Key，返回 (明文, 展示前缀, 哈希)。
+
+    明文只允许在创建响应里返回一次——调用方丢了只能吊销重发；
+    256 位熵 + URL 安全字符集，可直接放 HTTP 头（X-API-Key）。
+    """
+    plain = API_KEY_PREFIX + secrets.token_urlsafe(32)
+    return plain, plain[:_API_KEY_PREFIX_LEN], hash_api_key(plain)
 
 
 def hash_password(password: str) -> str:

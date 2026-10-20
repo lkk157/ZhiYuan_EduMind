@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     max_upload_files: int = 5
     max_upload_total_mb: int = 200
 
+    # ===== M7-2 服务化（/v1 对外网关）=====
+    # 排队等待上限（秒）：单机 8G 显存只允许一个推理请求（gateway 串行锁），
+    # 超过该时长仍未轮到就返回 429 + Retry-After，让调用方尽早退避而不是无限挂起。
+    # 容量本身不可配（固定 1）：放大并发=并发打 Ollama，直接违反显存红线
+    v1_queue_timeout: float = 30.0
+
     # ===== 路径（相对项目根目录）=====
     upload_dir: Path = Path("data/uploads")
     chroma_dir: Path = Path("data/chroma")
