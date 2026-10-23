@@ -112,6 +112,3 @@ curl -X POST http://127.0.0.1:8000/v1/rag/retrieve \
 ```
 
 完整端点、错误码、Python 示例与容量声明见 **[docs/API-服务化调用指南.md](docs/API-服务化调用指南.md)**。
-
-## 目录结构与开发里程碑
-完整目录树（含每文件职责标注）与 M0–M6 开发计划（2026-09-23 重排）见 **[docs/ROADMAP.md](docs/ROADMAP.md)**。
